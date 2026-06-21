@@ -1,9 +1,6 @@
-import { spawnSync } from 'child_process';
 import { existsSync, readdirSync } from 'fs';
 import { join, dirname, relative, sep } from 'path';
-import { fileURLToPath } from 'url';
 import * as p from '@clack/prompts';
-import pc from 'picocolors';
 
 import { readSkillLock, getGitHubToken, type SkillLockEntry } from './skill-lock.ts';
 import { computeSkillFolderHash, readLocalLock, type LocalSkillLockEntry } from './local-lock.ts';
@@ -18,10 +15,10 @@ import { fetchRepoTree, findSkillMdPaths, getSkillFolderHashFromTree } from './b
 import { removeCommand } from './remove.ts';
 import { sanitizeMetadata } from './sanitize.ts';
 import { track } from './telemetry.ts';
-import { agents, isUniversalAgent } from './agents.ts';
+import { agents, getUniversalAgents } from './agents.ts';
+import { isSkillInstalled } from './installer.ts';
+import { runAdd } from './add.ts';
 import type { AgentType } from './types.ts';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -281,6 +278,61 @@ export async function checkAndPromptForDeletions(
   return deletedSkills;
 }
 
+/**
+ * Detect which globally-installed agents currently have the given skill, so an
+ * update only re-installs to the agents that actually have it (no spread).
+ */
+async function detectInstalledAgentsForSkill(skillName: string): Promise<AgentType[]> {
+  const detected: AgentType[] = [];
+  const agentNames = Object.keys(agents) as AgentType[];
+  for (const agentName of agentNames) {
+    if (await isSkillInstalled(skillName, agentName, { global: true })) {
+      detected.push(agentName);
+    }
+  }
+  return detected;
+}
+
+/**
+ * Thrown to translate a `process.exit()` call inside `runAdd` into a catchable
+ * error so a single failed install does not tear down the whole update run.
+ */
+class RunAddExitError extends Error {
+  code: number;
+  constructor(code: number) {
+    super(`install exited with code ${code}`);
+    this.name = 'RunAddExitError';
+    this.code = code;
+  }
+}
+
+/**
+ * Run `runAdd` in-process while intercepting any `process.exit()` it performs,
+ * turning a non-zero exit into a thrown error instead of killing the CLI.
+ */
+async function runAddIsolated(
+  args: string[],
+  options: Parameters<typeof runAdd>[1]
+): Promise<void> {
+  const originalExit = process.exit;
+  process.exit = ((code?: number | string | null | undefined): never => {
+    const numeric = typeof code === 'number' ? code : code == null ? 0 : Number(code) || 0;
+    throw new RunAddExitError(numeric);
+  }) as typeof process.exit;
+
+  try {
+    await runAdd(args, options);
+  } catch (err) {
+    if (err instanceof RunAddExitError) {
+      if (err.code === 0) return;
+      throw new Error(`install failed (exit code ${err.code})`);
+    }
+    throw err;
+  } finally {
+    process.exit = originalExit;
+  }
+}
+
 export async function updateGlobalSkills(
   options: UpdateCheckOptions = {}
 ): Promise<{ successCount: number; failCount: number; checkedCount: number }> {
@@ -434,37 +486,82 @@ export async function updateGlobalSkills(
 
   if (updates.length === 0) {
     console.log(`${TEXT}✓ All global skills are up to date${RESET}`);
+    printSkippedSkills(skipped);
     return { successCount, failCount, checkedCount };
   }
 
-  console.log(`${TEXT}Found ${updates.length} global update(s)${RESET}`);
-  console.log();
+  // Group available updates by install source + the set of globally-installed
+  // agents that actually have each skill, so we only re-install where it lives.
+  interface GlobalUpdateGroup {
+    source: string;
+    agents: AgentType[];
+    skills: string[];
+  }
 
+  const groups = new Map<string, GlobalUpdateGroup>();
+  const notInstalled: string[] = [];
   for (const update of updates) {
-    const safeName = sanitizeMetadata(update.name);
-    console.log(`${TEXT}Updating ${safeName}...${RESET}`);
-    const installUrl = buildUpdateInstallSource(update.entry);
-
-    const cliEntry = join(__dirname, '..', 'bin', 'cli.mjs');
-    if (!existsSync(cliEntry)) {
-      failCount++;
-      console.log(
-        `  ${DIM}✗ Failed to update ${safeName}: CLI entrypoint not found at ${cliEntry}${RESET}`
-      );
+    const detectedAgents = await detectInstalledAgentsForSkill(update.name);
+    if (detectedAgents.length === 0) {
+      notInstalled.push(update.name);
       continue;
     }
-    const result = spawnSync(process.execPath, [cliEntry, 'add', installUrl, '-g', '-y'], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-      shell: process.platform === 'win32',
-    });
 
-    if (result.status === 0) {
-      successCount++;
-      console.log(`  ${TEXT}✓${RESET} Updated ${safeName}`);
+    const installSource = buildUpdateInstallSource(update.entry);
+    const sortedAgents = [...detectedAgents].sort();
+    const key = `${installSource}::${sortedAgents.join(',')}`;
+    const existing = groups.get(key);
+
+    if (existing) {
+      existing.skills.push(update.name);
     } else {
-      failCount++;
-      console.log(`  ${DIM}✗ Failed to update ${safeName}${RESET}`);
+      groups.set(key, { source: installSource, agents: sortedAgents, skills: [update.name] });
+    }
+  }
+
+  const updatableCount = Array.from(groups.values()).reduce((sum, g) => sum + g.skills.length, 0);
+
+  if (updatableCount === 0) {
+    if (notInstalled.length > 0) {
+      console.log(
+        `${DIM}${notInstalled.length} update(s) available but not installed in any global agent directory:${RESET}`
+      );
+      for (const name of notInstalled) {
+        console.log(`  ${DIM}• ${sanitizeMetadata(name)}${RESET}`);
+      }
+    }
+    printSkippedSkills(skipped);
+    return { successCount, failCount, checkedCount };
+  }
+
+  console.log(`${TEXT}Found ${updatableCount} global update(s)${RESET}`);
+  if (notInstalled.length > 0) {
+    console.log(
+      `${DIM}Skipping ${notInstalled.length}: not installed in any global agent directory${RESET}`
+    );
+    for (const name of notInstalled) {
+      console.log(`  ${DIM}• ${sanitizeMetadata(name)}${RESET}`);
+    }
+  }
+  console.log();
+
+  for (const group of groups.values()) {
+    const skillList = group.skills.map((s) => sanitizeMetadata(s)).join(', ');
+    console.log(`${TEXT}Updating ${skillList}...${RESET}`);
+
+    try {
+      await runAddIsolated([group.source], {
+        skill: group.skills,
+        agent: group.agents,
+        global: true,
+        yes: true,
+      });
+      successCount += group.skills.length;
+      console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
+    } catch (error) {
+      failCount += group.skills.length;
+      const message = error instanceof Error ? `: ${error.message}` : '';
+      console.log(`  ${DIM}✗ Failed to update ${skillList}${message}${RESET}`);
     }
   }
 
@@ -489,45 +586,11 @@ export async function updateProjectSkills(
     return { successCount, failCount, foundCount: 0 };
   }
 
-  const updatable = projectSkills.filter((s) => s.entry.skillPath);
-  const legacy = projectSkills.filter((s) => !s.entry.skillPath);
-
-  if (updatable.length === 0) {
-    console.log(`${DIM}No project skills can be updated in place.${RESET}`);
-    printLegacyProjectSkills(legacy);
-    return { successCount, failCount, foundCount: projectSkills.length };
-  }
-
-  const cwd = process.cwd();
-  const targetAgentNames: string[] = [];
-  let hasUniversal = false;
-
-  for (const [type, config] of Object.entries(agents)) {
-    if (isUniversalAgent(type as AgentType)) {
-      if (!hasUniversal && existsSync(join(cwd, '.agents'))) {
-        hasUniversal = true;
-      }
-    } else {
-      const agentRoot = config.skillsDir.split('/')[0]!;
-      if (existsSync(join(cwd, agentRoot))) {
-        targetAgentNames.push(config.displayName);
-      }
-    }
-  }
-
-  const targetParts: string[] = [];
-  if (hasUniversal) targetParts.push('Universal');
-  targetParts.push(...targetAgentNames);
-
-  if (targetParts.length > 0) {
-    console.log(`${TEXT}Updating for: ${targetParts.join(', ')}${RESET}`);
-  }
-
-  console.log(`${TEXT}Refreshing ${updatable.length} skill(s)...${RESET}`);
+  console.log(`${TEXT}Refreshing ${projectSkills.length} project skill(s)...${RESET}`);
   console.log();
 
-  const bySource = new Map<string, typeof updatable>();
-  for (const skill of updatable) {
+  const bySource = new Map<string, typeof projectSkills>();
+  for (const skill of projectSkills) {
     const source = skill.entry.source;
     const existing = bySource.get(source) || [];
     existing.push(skill);
@@ -535,29 +598,23 @@ export async function updateProjectSkills(
   }
 
   const localLock = await readLocalLock();
-  const cliEntry = join(__dirname, '..', 'bin', 'cli.mjs');
-
-  if (!existsSync(cliEntry)) {
-    console.log(`${DIM}✗ CLI entrypoint not found at ${cliEntry}${RESET}`);
-    return { successCount, failCount: updatable.length, foundCount: projectSkills.length };
-  }
+  const universalAgents = getUniversalAgents();
 
   for (const [source, skillsForSource] of bySource) {
     const firstEntry = skillsForSource[0]!.entry;
-    const sourceUrl = firstEntry.source;
     const ref = firstEntry.ref;
 
     const allLockedForSource = Object.entries(localLock.skills)
       .filter(([_, entry]) => entry.source === source)
       .map(([name, _]) => name);
 
+    // Detect skills deleted upstream (and optionally prune them) before refreshing.
     let tempDir: string | null = null;
     let deletedSkills: string[] = [];
 
     try {
-      tempDir = await cloneRepo(sourceUrl, ref);
+      tempDir = await cloneRepo(source, ref);
       const discovered = await discoverSkills(tempDir);
-
       const discoveredPaths = discovered.map((s) => {
         const relPath = relative(tempDir!, s.path);
         return join(relPath, 'SKILL.md').split(sep).join('/');
@@ -574,55 +631,35 @@ export async function updateProjectSkills(
     } catch (error) {
       console.log(`${DIM}✗ Failed to check for deleted skills from ${source}${RESET}`);
     } finally {
-      if (tempDir) {
-        await cleanupTempDir(tempDir);
-      }
+      if (tempDir) await cleanupTempDir(tempDir);
     }
 
     const remainingSkills = skillsForSource.filter((s) => !deletedSkills.includes(s.name));
+    if (remainingSkills.length === 0) continue;
 
-    for (const skill of remainingSkills) {
-      const safeName = sanitizeMetadata(skill.name);
-      console.log(`${TEXT}Updating ${safeName}...${RESET}`);
-      const installUrl = formatSourceInput(skill.entry.source, skill.entry.ref);
+    const installSource = buildLocalUpdateSource(firstEntry);
+    const skillNames = remainingSkills.map((s) => s.name);
+    const skillList = skillNames.map((s) => sanitizeMetadata(s)).join(', ');
+    console.log(`${TEXT}Updating ${skillList}...${RESET}`);
 
-      const result = spawnSync(
-        process.execPath,
-        [cliEntry, 'add', installUrl, '--skill', skill.name, '-y'],
-        {
-          stdio: ['inherit', 'pipe', 'pipe'],
-          encoding: 'utf-8',
-          shell: process.platform === 'win32',
-        }
-      );
-
-      if (result.status === 0) {
-        successCount++;
-        console.log(`  ${TEXT}✓${RESET} Updated ${safeName}`);
-      } else {
-        failCount++;
-        console.log(`  ${DIM}✗ Failed to update ${safeName}${RESET}`);
-      }
+    try {
+      // Target only the universal agent dir(s) so a project update never spreads
+      // into agent-specific folders (.claude, .cursor, …) that weren't installed.
+      await runAddIsolated([installSource], {
+        skill: skillNames,
+        agent: universalAgents,
+        yes: true,
+      });
+      successCount += skillNames.length;
+      console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
+    } catch (error) {
+      failCount += skillNames.length;
+      const message = error instanceof Error ? `: ${error.message}` : '';
+      console.log(`  ${DIM}✗ Failed to update ${skillList}${message}${RESET}`);
     }
   }
 
-  printLegacyProjectSkills(legacy);
   return { successCount, failCount, foundCount: projectSkills.length };
-}
-
-export function printLegacyProjectSkills(
-  legacy: Array<{ name: string; source: string; entry: LocalSkillLockEntry }>
-): void {
-  if (legacy.length === 0) return;
-  console.log();
-  console.log(
-    `${DIM}${legacy.length} project skill(s) cannot be updated automatically (installed before skillPath tracking):${RESET}`
-  );
-  for (const skill of legacy) {
-    const reinstall = formatSourceInput(skill.entry.source, skill.entry.ref);
-    console.log(`  ${TEXT}•${RESET} ${sanitizeMetadata(skill.name)}`);
-    console.log(`    ${DIM}To refresh: ${TEXT}npx skills add ${reinstall} -y${RESET}`);
-  }
 }
 
 export async function runUpdate(args: string[] = []): Promise<void> {
