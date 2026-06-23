@@ -226,9 +226,25 @@ description: A project skill
 `
       );
 
+      // Create a global skill under the isolated HOME (set by vitest.setup.ts)
+      // so `-g` has global scope to display. Self-contained: does not depend on
+      // the developer's real ~/.agents/skills.
+      const globalSkillDir = join(homedir(), '.agents', 'skills', 'global-only-skill');
+      mkdirSync(globalSkillDir, { recursive: true });
+      writeFileSync(
+        join(globalSkillDir, 'SKILL.md'),
+        `---
+name: global-only-skill
+description: A global skill
+---
+# Global Only Skill
+`
+      );
+
       const result = runCli(['list', '-g'], testDir);
-      // Should not show project skill when -g is specified
+      // Should show global scope, not the project skill.
       expect(result.stdout).not.toContain('project-skill');
+      expect(result.stdout).toContain('global-only-skill');
       expect(result.stdout).toContain('Global Skills');
     });
 
