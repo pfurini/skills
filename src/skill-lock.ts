@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, copyFile, unlink } from 'fs/promises';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -73,38 +73,87 @@ export function getSkillLockPath(): string {
 }
 
 /**
- * Read the skill lock file.
- * Returns an empty lock file structure if the file doesn't exist.
- * Wipes the lock file if it's an old format (version < CURRENT_VERSION).
+ * Copy the lock file to a sibling backup path (best-effort).
+ * Used before any operation that would otherwise discard existing entries,
+ * so a corrupt or migrated lock is never silently lost.
+ *
+ * @returns The backup path if a copy was made, otherwise null.
  */
-export async function readSkillLock(): Promise<SkillLockFile> {
-  const lockPath = getSkillLockPath();
-
+async function backupLockFile(lockPath: string, suffix: string): Promise<string | null> {
+  const backupPath = `${lockPath}.${suffix}`;
   try {
-    const content = await readFile(lockPath, 'utf-8');
-    const parsed = JSON.parse(content) as SkillLockFile;
-
-    // Validate version - wipe if old format
-    if (typeof parsed.version !== 'number' || !parsed.skills) {
-      return createEmptyLockFile();
-    }
-
-    // If old version, wipe and start fresh (backwards incompatible change)
-    // v3 adds skillFolderHash - we want fresh installs to populate it
-    if (parsed.version < CURRENT_VERSION) {
-      return createEmptyLockFile();
-    }
-
-    return parsed;
-  } catch (error) {
-    // File doesn't exist or is invalid - return empty
-    return createEmptyLockFile();
+    await copyFile(lockPath, backupPath);
+    return backupPath;
+  } catch {
+    // Nothing to back up (file missing) or copy failed — not fatal.
+    return null;
   }
 }
 
 /**
- * Write the skill lock file.
- * Creates the directory if it doesn't exist.
+ * Read the skill lock file.
+ *
+ * Returns an empty lock file structure if the file genuinely doesn't exist.
+ * On a corrupt or outdated lock the previous contents are ALWAYS backed up to a
+ * sibling file before an empty lock is returned, so a transient read failure can
+ * never silently cascade into a destructive write that wipes all tracking.
+ *
+ * Read errors other than "file not found" are rethrown rather than swallowed:
+ * proceeding with an empty lock (and overwriting on the next write) would
+ * destroy data we simply failed to read.
+ */
+export async function readSkillLock(): Promise<SkillLockFile> {
+  const lockPath = getSkillLockPath();
+
+  let content: string;
+  try {
+    content = await readFile(lockPath, 'utf-8');
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      // Genuinely absent — a fresh empty lock is correct.
+      return createEmptyLockFile();
+    }
+    // EACCES/EIO/etc. — do NOT pretend the lock is empty; that would let the
+    // next write clobber real entries. Surface the error instead.
+    throw error;
+  }
+
+  let parsed: SkillLockFile;
+  try {
+    parsed = JSON.parse(content) as SkillLockFile;
+  } catch {
+    // Corrupt JSON (e.g. a truncated/interrupted write). Preserve it before any
+    // caller overwrites the file, and tell the user where it went.
+    const backup = await backupLockFile(lockPath, `corrupt-${process.pid}`);
+    process.stderr.write(
+      `${pc.yellow('│')}  ${pc.yellow('skills: skill lock file was corrupt and has been reset')}\n` +
+        (backup ? `${pc.yellow('│')}  ${pc.dim(`Previous contents saved to ${backup}`)}\n` : '')
+    );
+    return createEmptyLockFile();
+  }
+
+  // Validate shape - back up before discarding so nothing is lost silently.
+  if (typeof parsed.version !== 'number' || !parsed.skills) {
+    await backupLockFile(lockPath, `invalid-${process.pid}`);
+    return createEmptyLockFile();
+  }
+
+  // Old version: migration is backwards-incompatible (v3 adds skillFolderHash),
+  // so we start fresh - but keep the old lock so entries can be recovered.
+  if (parsed.version < CURRENT_VERSION) {
+    await backupLockFile(lockPath, `v${parsed.version}`);
+    return createEmptyLockFile();
+  }
+
+  return parsed;
+}
+
+/**
+ * Write the skill lock file atomically.
+ *
+ * Writes to a temp file in the same directory and renames it over the target,
+ * so a crash or concurrent invocation can never leave a half-written (corrupt)
+ * lock on disk. The previous good lock is kept as a `.bak` sibling.
  */
 export async function writeSkillLock(lock: SkillLockFile): Promise<void> {
   const lockPath = getSkillLockPath();
@@ -112,9 +161,22 @@ export async function writeSkillLock(lock: SkillLockFile): Promise<void> {
   // Ensure directory exists
   await mkdir(dirname(lockPath), { recursive: true });
 
+  // Keep the previous lock as a backup before overwriting it.
+  await backupLockFile(lockPath, 'bak');
+
   // Write with pretty formatting for human readability
   const content = JSON.stringify(lock, null, 2);
-  await writeFile(lockPath, content, 'utf-8');
+
+  // Atomic replace: write to a temp file, then rename over the target. rename(2)
+  // is atomic within the same filesystem, so readers never see a partial file.
+  const tmpPath = `${lockPath}.tmp-${process.pid}`;
+  try {
+    await writeFile(tmpPath, content, 'utf-8');
+    await rename(tmpPath, lockPath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => {});
+    throw error;
+  }
 }
 
 /**

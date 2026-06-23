@@ -384,4 +384,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().finally(() => flushTelemetry().then(() => process.exit(0)));
+main()
+  .catch((error) => {
+    // Render a clean message instead of an unhandled-rejection stack dump, e.g.
+    // when the skill lock cannot be read (EACCES/EISDIR) and readSkillLock throws.
+    process.exitCode = 1;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`\n${BOLD}\x1b[31mError:${RESET} ${message}\n`);
+  })
+  .finally(() => flushTelemetry().then(() => process.exit(process.exitCode ?? 0)));
