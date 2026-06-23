@@ -68,7 +68,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'antigravity',
     displayName: 'Antigravity',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.gemini/antigravity/skills'),
+    globalSkillsDir: join(home, '.gemini/config/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.gemini/antigravity'));
     },
@@ -243,7 +243,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'deepagents',
     displayName: 'Deep Agents',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.deepagents/agent/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.deepagents'));
     },
@@ -292,7 +292,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'firebender',
     displayName: 'Firebender',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.firebender/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     showInUniversalPrompt: false,
     detectInstalled: async () => {
       return existsSync(join(home, '.firebender'));
@@ -311,7 +311,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'gemini-cli',
     displayName: 'Gemini CLI',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.gemini/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.gemini'));
     },
@@ -320,7 +320,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'github-copilot',
     displayName: 'GitHub Copilot',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.copilot/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.copilot'));
     },
