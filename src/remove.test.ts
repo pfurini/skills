@@ -310,6 +310,59 @@ This is a test skill.
     });
   });
 
+  describe('global lock dangling cleanup', () => {
+    let tempHome: string;
+
+    beforeEach(() => {
+      tempHome = join(
+        tmpdir(),
+        `skills-remove-home-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
+      mkdirSync(join(tempHome, '.agents'), { recursive: true });
+    });
+
+    afterEach(() => {
+      if (existsSync(tempHome)) {
+        rmSync(tempHome, { recursive: true, force: true });
+      }
+    });
+
+    it('purges a dangling global lock entry whose files are not on disk', () => {
+      // HOME override isolates the global lock to tempHome (never the real ~).
+      const lockPath = join(tempHome, '.agents', '.skill-lock.json');
+      writeFileSync(
+        lockPath,
+        JSON.stringify(
+          {
+            version: 3,
+            skills: {
+              'dangling-skill': {
+                source: 'test/repo',
+                sourceType: 'github',
+                sourceUrl: 'https://github.com/test/repo',
+                ref: 'main',
+                skillPath: 'skills/dangling-skill/SKILL.md',
+                skillFolderHash: 'abc123',
+                installedAt: '2024-01-01T00:00:00.000Z',
+                updatedAt: '2024-01-01T00:00:00.000Z',
+              },
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      // No on-disk folder for 'dangling-skill' -> it exists only in the lock.
+      const result = runCli(['remove', 'dangling-skill', '-g', '-y'], testDir, { HOME: tempHome });
+
+      expect(result.stdout).toContain('Successfully removed');
+
+      const after = JSON.parse(readFileSync(lockPath, 'utf-8'));
+      expect(after.skills['dangling-skill']).toBeUndefined();
+    });
+  });
+
   describe('help and info', () => {
     it('should show help with --help', () => {
       const result = runCli(['remove', '--help'], testDir);

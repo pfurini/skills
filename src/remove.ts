@@ -5,7 +5,7 @@ import { join } from 'path';
 import { agents, detectInstalledAgents } from './agents.ts';
 import { track } from './telemetry.ts';
 import { detectAgent } from './detect-agent.ts';
-import { removeSkillFromLock, getSkillFromLock } from './skill-lock.ts';
+import { removeSkillFromLock, getSkillFromLock, readSkillLock } from './skill-lock.ts';
 import { removeSkillFromLocalLock, readLocalLock } from './local-lock.ts';
 import type { AgentType } from './types.ts';
 import {
@@ -72,9 +72,26 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
   }
 
   const installedSkills = Array.from(skillNamesSet).sort();
-  spinner.stop(`Found ${installedSkills.length} unique installed skill(s)`);
 
-  if (installedSkills.length === 0) {
+  // In global mode the lock can hold entries whose files are already gone
+  // (dangling). Surface those so `remove -g <name>` (and `--all`) can still
+  // purge the orphaned lock entry even when nothing is left on disk.
+  let lockOnlySkills: string[] = [];
+  if (isGlobal) {
+    const lock = await readSkillLock();
+    lockOnlySkills = Object.keys(lock.skills).filter(
+      (name) => !skillNamesSet.has(name) && !skillNamesSet.has(sanitizeName(name))
+    );
+  }
+  const lockOnlySet = new Set(lockOnlySkills);
+  const removableSkills = Array.from(new Set([...installedSkills, ...lockOnlySkills])).sort();
+
+  spinner.stop(
+    `Found ${installedSkills.length} installed skill(s)` +
+      (lockOnlySkills.length > 0 ? ` and ${lockOnlySkills.length} dangling lock entry(ies)` : '')
+  );
+
+  if (removableSkills.length === 0) {
     p.outro(pc.yellow('No skills found to remove.'));
     return;
   }
@@ -94,9 +111,9 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
   let selectedSkills: string[] = [];
 
   if (options.all) {
-    selectedSkills = installedSkills;
+    selectedSkills = removableSkills;
   } else if (skillNames.length > 0) {
-    selectedSkills = installedSkills.filter((s) =>
+    selectedSkills = removableSkills.filter((s) =>
       skillNames.some((name) => name.toLowerCase() === s.toLowerCase())
     );
 
@@ -105,9 +122,10 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
       return;
     }
   } else {
-    const choices = installedSkills.map((s) => ({
+    const choices = removableSkills.map((s) => ({
       value: s,
       label: s,
+      ...(lockOnlySet.has(s) ? { hint: 'lock entry — files not on disk' } : {}),
     }));
 
     const selected = await p.multiselect({
