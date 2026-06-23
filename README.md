@@ -168,6 +168,12 @@ npx skills update -y
 | `-y, --yes`     | Skip scope prompt (auto-detect: project if in a project dir, else global) |
 | `[skills...]`   | Update specific skills by name instead of all                             |
 
+Updates are scoped to what you already have installed, so they never spread a skill to agents you don't use:
+
+- **Global updates** re-install each updated skill only to the agents whose global directory already contains it. A skill that has an update available but isn't installed in any global agent directory is reported and skipped.
+- **Project updates** only refresh the universal `.agents/skills` directory; they never create agent-specific folders (`.claude`, `.cursor`, …) that weren't already present.
+- **Both scopes** detect skills that were deleted upstream and offer to remove the local copies (skipped automatically with `-y`).
+
 ### `skills init`
 
 ```bash
