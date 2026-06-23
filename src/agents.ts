@@ -59,7 +59,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'amp',
     displayName: 'Amp',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(configHome, 'agents/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(configHome, 'amp'));
     },
@@ -224,8 +224,8 @@ export const agents: Record<AgentType, AgentConfig> = {
   crush: {
     name: 'crush',
     displayName: 'Crush',
-    skillsDir: '.crush/skills',
-    globalSkillsDir: join(home, '.config/crush/skills'),
+    skillsDir: '.agents/skills',
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.config/crush'));
     },
@@ -251,8 +251,8 @@ export const agents: Record<AgentType, AgentConfig> = {
   devin: {
     name: 'devin',
     displayName: 'Devin for Terminal',
-    skillsDir: '.devin/skills',
-    globalSkillsDir: join(configHome, 'devin/skills'),
+    skillsDir: '.agents/skills',
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(configHome, 'devin'));
     },
@@ -328,8 +328,8 @@ export const agents: Record<AgentType, AgentConfig> = {
   goose: {
     name: 'goose',
     displayName: 'Goose',
-    skillsDir: '.goose/skills',
-    globalSkillsDir: join(configHome, 'goose/skills'),
+    skillsDir: '.agents/skills',
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(configHome, 'goose'));
     },
@@ -474,7 +474,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'opencode',
     displayName: 'OpenCode',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(configHome, 'opencode/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(configHome, 'opencode'));
     },
@@ -537,7 +537,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'replit',
     displayName: 'Replit',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(configHome, 'agents/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     showInUniversalList: false,
     detectInstalled: async () => {
       return existsSync(join(process.cwd(), '.replit'));

@@ -22,8 +22,9 @@ describe('XDG config paths', () => {
   const home = homedir();
 
   describe('OpenCode', () => {
-    it('uses ~/.config/opencode/skills for global skills (not ~/Library/Preferences)', () => {
-      const expected = join(home, '.config', 'opencode', 'skills');
+    it('uses ~/.agents/skills for global skills (not ~/Library/Preferences)', () => {
+      // OpenCode reads the universal ~/.agents/skills dir; we standardize on it.
+      const expected = join(home, '.agents', 'skills');
       expect(agents.opencode.globalSkillsDir).toBe(expected);
     });
 
@@ -35,8 +36,9 @@ describe('XDG config paths', () => {
   });
 
   describe('Amp', () => {
-    it('uses ~/.config/agents/skills for global skills', () => {
-      const expected = join(home, '.config', 'agents', 'skills');
+    it('uses ~/.agents/skills for global skills', () => {
+      // Amp reads ~/.agents/skills too; we standardize all universal agents on it.
+      const expected = join(home, '.agents', 'skills');
       expect(agents.amp.globalSkillsDir).toBe(expected);
     });
 
@@ -60,8 +62,9 @@ describe('XDG config paths', () => {
   });
 
   describe('Goose', () => {
-    it('uses ~/.config/goose/skills for global skills', () => {
-      const expected = join(home, '.config', 'goose', 'skills');
+    it('uses ~/.agents/skills for global skills', () => {
+      // Goose standardized on ~/.agents/skills (PR #8239); ~/.config/goose/skills is not read.
+      const expected = join(home, '.agents', 'skills');
       expect(agents.goose.globalSkillsDir).toBe(expected);
     });
 
@@ -105,8 +108,8 @@ describe('XDG config paths', () => {
   });
 
   describe('non-XDG agents', () => {
-    it('cursor uses ~/.cursor/skills (home-based, not XDG)', () => {
-      const expected = join(home, '.cursor', 'skills');
+    it('cursor uses ~/.agents/skills (universal global dir)', () => {
+      const expected = join(home, '.agents', 'skills');
       expect(agents.cursor.globalSkillsDir).toBe(expected);
     });
 
