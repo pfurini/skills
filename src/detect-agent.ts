@@ -13,7 +13,7 @@ const agentNameToType: Record<string, AgentType> = {
   'cursor-cli': 'cursor',
   claude: 'claude-code',
   cowork: 'claude-code',
-  devin: 'universal', // Devin not in skills-cli agent list, use universal
+  devin: 'devin',
   replit: 'replit',
   gemini: 'gemini-cli',
   codex: 'codex',

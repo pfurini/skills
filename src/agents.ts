@@ -709,7 +709,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'universal',
     displayName: 'Universal',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(configHome, 'agents/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     showInUniversalList: false,
     detectInstalled: async () => false,
   },
