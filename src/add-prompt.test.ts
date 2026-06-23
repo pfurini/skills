@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { promptForAgents } from './add.js';
+import { promptForAgents, selectAgentsInteractive } from './add.js';
 import * as skillLock from './skill-lock.js';
 import * as searchMultiselectModule from './prompts/search-multiselect.js';
 
@@ -99,5 +99,52 @@ describe('promptForAgents', () => {
     await promptForAgents('Select agents', choices);
 
     expect(skillLock.saveSelectedAgents).not.toHaveBeenCalled();
+  });
+});
+
+describe('selectAgentsInteractive', () => {
+  // droid and augment are both non-universal agents; cursor is universal.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should not pre-select a remembered agent that is not currently installed', async () => {
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid', 'augment']);
+    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['augment']);
+
+    // Only augment is detected on disk; droid (no .factory) must be dropped.
+    await selectAgentsInteractive({ installedAgents: ['augment'] as any });
+
+    expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialSelected: ['augment'],
+      })
+    );
+  });
+
+  it('should pre-select remembered agents that are installed', async () => {
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid', 'augment']);
+    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['droid', 'augment']);
+
+    await selectAgentsInteractive({ installedAgents: ['droid', 'augment'] as any });
+
+    expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialSelected: ['droid', 'augment'],
+      })
+    );
+  });
+
+  it('should keep remembered agents when no installed list is provided', async () => {
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid']);
+    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['droid']);
+
+    await selectAgentsInteractive({});
+
+    expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initialSelected: ['droid'],
+      })
+    );
   });
 });
