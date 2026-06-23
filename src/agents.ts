@@ -189,7 +189,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'codex',
     displayName: 'Codex',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(codexHome, 'skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(codexHome) || existsSync('/etc/codex');
     },
@@ -234,7 +234,7 @@ export const agents: Record<AgentType, AgentConfig> = {
     name: 'cursor',
     displayName: 'Cursor',
     skillsDir: '.agents/skills',
-    globalSkillsDir: join(home, '.cursor/skills'),
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.cursor'));
     },
@@ -500,8 +500,8 @@ export const agents: Record<AgentType, AgentConfig> = {
   pi: {
     name: 'pi',
     displayName: 'Pi',
-    skillsDir: '.pi/skills',
-    globalSkillsDir: join(home, '.pi/agent/skills'),
+    skillsDir: '.agents/skills',
+    globalSkillsDir: join(home, '.agents/skills'),
     detectInstalled: async () => {
       return existsSync(join(home, '.pi/agent'));
     },
