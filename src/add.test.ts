@@ -6,6 +6,21 @@ import { runCli } from './test-utils.ts';
 import { shouldInstallInternalSkills } from './skills.ts';
 import { parseAddOptions, getLockSource } from './add.ts';
 
+// Run global (`-g`) installs against a throwaway HOME under the test dir so they
+// never write to the real ~/.agents, ~/.claude, etc. Overrides every base-dir
+// env var the agents config consults; cleaned up together with testDir.
+function isolatedGlobalEnv(testDir: string): Record<string, string> {
+  const home = join(testDir, 'home');
+  mkdirSync(home, { recursive: true });
+  return {
+    HOME: home,
+    XDG_STATE_HOME: join(home, '.state'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CODEX_HOME: join(home, '.codex'),
+  };
+}
+
 describe('add command', () => {
   let testDir: string;
 
@@ -84,7 +99,11 @@ Instructions here.
     const targetDir = join(testDir, 'project');
     mkdirSync(targetDir, { recursive: true });
 
-    const result = runCli(['add', testDir, '-y', '-g', '--agent', 'claude-code'], targetDir);
+    const result = runCli(
+      ['add', testDir, '-y', '-g', '--agent', 'claude-code'],
+      targetDir,
+      isolatedGlobalEnv(testDir)
+    );
     expect(result.stdout).toContain('my-skill');
     expect(result.stdout).toContain('Done!');
     expect(result.exitCode).toBe(0);
@@ -496,7 +515,11 @@ This is a test skill for -y flag mode testing.
     );
 
     // Run with -y flag - should complete without hanging
-    const result = runCli(['add', testDir, '-g', '-y', '--skill', 'yes-flag-test-skill'], testDir);
+    const result = runCli(
+      ['add', testDir, '-g', '-y', '--skill', 'yes-flag-test-skill'],
+      testDir,
+      isolatedGlobalEnv(testDir)
+    );
 
     // Should not contain the find-skills prompt
     expect(result.stdout).not.toContain('Install the find-skills skill');
