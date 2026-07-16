@@ -3,7 +3,7 @@
 The CLI for the open agent skills ecosystem.
 
 <!-- agent-list:start -->
-Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [68 more](#supported-agents).
+Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [69 more](#supported-agents).
 <!-- agent-list:end -->
 
 [![skills.sh](https://skills.sh/b/vercel-labs/skills)](https://skills.sh/vercel-labs/skills)
@@ -139,6 +139,9 @@ npx skills find
 
 # Search by keyword
 npx skills find typescript
+
+# Search across every repository owned by an organization or user
+npx skills find react --owner vercel
 ```
 
 ### `skills update`
@@ -304,6 +307,7 @@ Skills can be installed to any of these agents:
 | Trae | `trae` | `.trae/skills/` | `~/.trae/skills/` |
 | Trae CN | `trae-cn` | `.trae/skills/` | `~/.trae-cn/skills/` |
 | Windsurf | `windsurf` | `.windsurf/skills/` | `~/.codeium/windsurf/skills/` |
+| ZCode | `zcode` | `.zcode/skills/` | `~/.zcode/skills/` |
 | Zencoder, Zenflow | `zencoder`, `zenflow` | `.zencoder/skills/` | `~/.zencoder/skills/` |
 | Neovate | `neovate` | `.neovate/skills/` | `~/.neovate/skills/` |
 | Pochi | `pochi` | `.pochi/skills/` | `~/.pochi/skills/` |
@@ -430,6 +434,7 @@ to also discover `SKILL.md` files outside these container directories
 - `.tinycloud/skills/`
 - `.trae/skills/`
 - `.windsurf/skills/`
+- `.zcode/skills/`
 - `.zencoder/skills/`
 - `.neovate/skills/`
 - `.pochi/skills/`

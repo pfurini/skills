@@ -116,6 +116,9 @@ ${BOLD}Manage Skills:${RESET}
   list, ls             List installed skills
   find [query]         Search for skills interactively
 
+${BOLD}Find Options:${RESET}
+  --owner <owner>        Search only repositories from a GitHub owner
+
 ${BOLD}Updates:${RESET}
   update [skills...]   Update skills to latest versions (alias: upgrade)
 
@@ -136,6 +139,8 @@ ${BOLD}Add Options:${RESET}
   -l, --list             List available skills in the repository without installing
   -y, --yes              Skip confirmation prompts
   --copy                 Copy files instead of symlinking to agent directories
+  --metadata <json>      Attach valid JSON to the install telemetry event
+  --subagent <names>     Install to Eve subagents (use 'root' for the root agent)
   --all                  Shorthand for --skill '*' --agent '*' -y
   --full-depth           Search all subdirectories even when a root SKILL.md exists
 
@@ -182,6 +187,7 @@ ${BOLD}Examples:${RESET}
   ${DIM}$${RESET} skills ls --json                      ${DIM}# JSON output${RESET}
   ${DIM}$${RESET} skills find                          ${DIM}# interactive search${RESET}
   ${DIM}$${RESET} skills find typescript               ${DIM}# search by keyword${RESET}
+  ${DIM}$${RESET} skills find react --owner vercel     ${DIM}# search within an owner${RESET}
   ${DIM}$${RESET} skills update
   ${DIM}$${RESET} skills update my-skill             ${DIM}# update a single skill${RESET}
   ${DIM}$${RESET} skills update -g                    ${DIM}# update global skills only${RESET}
@@ -330,7 +336,12 @@ async function main(): Promise<void> {
     case 'a':
     case 'add': {
       if (!inAgent) showLogo();
-      const { source: addSource, options: addOpts } = parseAddOptions(restArgs);
+      const { source: addSource, options: addOpts, errors } = parseAddOptions(restArgs);
+      if (errors.length > 0) {
+        for (const error of errors) console.error(`Error: ${error}`);
+        process.exitCode = 1;
+        break;
+      }
       await runAdd(addSource, addOpts);
       break;
     }
@@ -345,7 +356,7 @@ async function main(): Promise<void> {
     }
     case 'remove':
     case 'rm':
-    case 'r':
+    case 'r': {
       // Check for --help or -h flag
       if (restArgs.includes('--help') || restArgs.includes('-h')) {
         showRemoveHelp();
@@ -354,6 +365,7 @@ async function main(): Promise<void> {
       const { skills, options: removeOptions } = parseRemoveOptions(restArgs);
       await removeCommand(skills, removeOptions);
       break;
+    }
     case 'experimental_sync': {
       if (!inAgent) showLogo();
       const { options: syncOptions } = parseSyncOptions(restArgs);

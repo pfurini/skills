@@ -1,7 +1,18 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { dirname, basename, join } from 'path';
-import { getSkillLockPath, readSkillLock, addSkillToLock } from './skill-lock.ts';
+
+const { execSync } = vi.hoisted(() => ({ execSync: vi.fn() }));
+
+vi.mock('child_process', () => ({ execSync }));
+
+import {
+  getSkillLockPath,
+  readSkillLock,
+  addSkillToLock,
+  getGitHubToken,
+  resetGhAuthWarning,
+} from './skill-lock.ts';
 
 // HOME is redirected to a throwaway dir by vitest.setup.ts, so these operate on
 // an isolated global lock, never the developer's real ~/.agents/.skill-lock.json.
@@ -71,11 +82,7 @@ describe('skill-lock durability', () => {
     // add-style write. The added entry is written, but the previously-tracked
     // entries (now unrecoverable from the empty in-memory lock) must still be
     // retrievable from the corrupt backup left on disk.
-    writeFileSync(
-      lockPath,
-      '{ "version": 3, "skills": { "keeper-1": {}, "keeper-2": {', // corrupt
-      'utf-8'
-    );
+    writeFileSync(lockPath, '{ "version": 3, "skills": { "keeper-1": {}, "keeper-2": {', 'utf-8');
 
     await addSkillToLock('newly-added', entry('o/newly-added'));
 
@@ -93,5 +100,46 @@ describe('skill-lock durability', () => {
     rmSync(lockDir, { recursive: true, force: true });
     mkdirSync(lockPath, { recursive: true }); // lockPath is now a directory
     await expect(readSkillLock()).rejects.toThrow();
+  });
+});
+
+describe('getGitHubToken', () => {
+  const originalGitHubToken = process.env.GITHUB_TOKEN;
+  const originalGhToken = process.env.GH_TOKEN;
+  let stderrWrite: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    resetGhAuthWarning();
+    execSync.mockReset().mockReturnValue('ghp_test_token\n');
+    stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    stderrWrite.mockRestore();
+    if (originalGitHubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = originalGitHubToken;
+    }
+    if (originalGhToken === undefined) {
+      delete process.env.GH_TOKEN;
+    } else {
+      process.env.GH_TOKEN = originalGhToken;
+    }
+  });
+
+  it('describes the gh fallback as an automatic status, not an instruction', () => {
+    expect(getGitHubToken()).toBe('ghp_test_token');
+
+    const status = stderrWrite.mock.calls
+      .map(([message]: [unknown, ...unknown[]]) => String(message))
+      .join('');
+    expect(status).toContain('GitHub API request limit reached');
+    expect(status).toContain('checking existing');
+    expect(status).toContain('authentication…');
+    expect(status).not.toContain('Tip:');
+    expect(status).not.toContain('to continue');
   });
 });
