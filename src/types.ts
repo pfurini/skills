@@ -30,12 +30,14 @@ export type AgentType =
   | 'gemini-cli'
   | 'github-copilot'
   | 'goose'
+  | 'grok'
   | 'hermes-agent'
   | 'inference-sh'
   | 'iflow-cli'
   | 'jazz'
   | 'junie'
   | 'kilo'
+  | 'kimchi'
   | 'kimi-code-cli'
   | 'kiro-cli'
   | 'kode'
@@ -98,7 +100,7 @@ export interface AgentConfig {
 }
 
 export interface ParsedSource {
-  type: 'github' | 'gitlab' | 'git' | 'local' | 'well-known';
+  type: 'github' | 'gitlab' | 'git' | 'local' | 'well-known' | 'download';
   url: string;
   subpath?: string;
   localPath?: string;

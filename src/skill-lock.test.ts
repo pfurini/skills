@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { dirname, basename, join } from 'path';
 
@@ -106,7 +106,7 @@ describe('skill-lock durability', () => {
 describe('getGitHubToken', () => {
   const originalGitHubToken = process.env.GITHUB_TOKEN;
   const originalGhToken = process.env.GH_TOKEN;
-  let stderrWrite: ReturnType<typeof vi.spyOn>;
+  let stderrWrite: MockInstance<typeof process.stderr.write>;
 
   beforeEach(() => {
     delete process.env.GITHUB_TOKEN;

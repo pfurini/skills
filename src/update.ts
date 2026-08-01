@@ -8,10 +8,11 @@ import {
   formatSourceInput,
   buildUpdateInstallSource,
   buildLocalUpdateSource,
+  shouldUseFullDepthForUpdate,
 } from './update-source.ts';
 import { cloneRepo, cleanupTempDir } from './git.ts';
 import { discoverSkills } from './skills.ts';
-import { fetchRepoTree, findSkillMdPaths, getSkillFolderHashFromTree } from './blob.ts';
+import { fetchRepoTree, getSkillFolderHashFromTree } from './blob.ts';
 import { removeCommand } from './remove.ts';
 import { sanitizeMetadata } from './sanitize.ts';
 import { track } from './telemetry.ts';
@@ -294,6 +295,20 @@ async function detectInstalledAgentsForSkill(skillName: string): Promise<AgentTy
 }
 
 /**
+ * Whether a SKILL.md path is discoverable from the repo root without
+ * --full-depth: anything under the root `skills/` container (walked deep by
+ * discoverSkills), or a depth-1 folder at the root. Deep paths (e.g.
+ * plugins/<name>/skills/<skill>/SKILL.md) require full-depth discovery when
+ * the install is batched per repo instead of targeted by appended subpath.
+ */
+function isStandardSkillLocation(skillPath?: string): boolean {
+  if (!skillPath) return true;
+  const normalized = skillPath.split(sep).join('/');
+  if (normalized.startsWith('skills/')) return true;
+  return normalized.split('/').length === 2;
+}
+
+/**
  * Thrown to translate a `process.exit()` call inside `runAdd` into a catchable
  * error so a single failed install does not tear down the whole update run.
  */
@@ -399,7 +414,9 @@ export async function updateGlobalSkills(
           continue;
         }
 
-        const discoveredPaths = findSkillMdPaths(tree);
+        const discoveredPaths = tree.tree
+          .filter((entry) => entry.type === 'blob')
+          .map((entry) => entry.path);
 
         const allLockedForSource = Object.entries(lock.skills)
           .filter(([_, entry]) => entry.source === source)
@@ -429,9 +446,11 @@ export async function updateGlobalSkills(
       }
 
       tempDir = await cloneRepo(sourceUrl, firstEntry.ref);
-      const discoveredPaths = (await discoverSkills(tempDir)).map((skill) => {
-        return join(relative(tempDir!, skill.path), 'SKILL.md').split(sep).join('/');
-      });
+      const discoveredPaths = (await discoverSkills(tempDir, undefined, { fullDepth: true })).map(
+        (skill) => {
+          return join(relative(tempDir!, skill.path), 'SKILL.md').split(sep).join('/');
+        }
+      );
 
       const allLockedForSource = Object.entries(lock.skills)
         .filter(([_, entry]) => entry.source === source)
@@ -496,6 +515,7 @@ export async function updateGlobalSkills(
     source: string;
     agents: AgentType[];
     skills: string[];
+    needsFullDepth: boolean;
   }
 
   const groups = new Map<string, GlobalUpdateGroup>();
@@ -522,8 +542,14 @@ export async function updateGlobalSkills(
 
     if (existing) {
       existing.skills.push(update.name);
+      existing.needsFullDepth ||= shouldUseFullDepthForUpdate(update.entry);
     } else {
-      groups.set(key, { source: installSource, agents: sortedAgents, skills: [update.name] });
+      groups.set(key, {
+        source: installSource,
+        agents: sortedAgents,
+        skills: [update.name],
+        needsFullDepth: shouldUseFullDepthForUpdate(update.entry),
+      });
     }
   }
 
@@ -563,6 +589,7 @@ export async function updateGlobalSkills(
         agent: group.agents,
         global: true,
         yes: true,
+        fullDepth: group.needsFullDepth,
       });
       successCount += group.skills.length;
       console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
@@ -664,7 +691,7 @@ export async function updateProjectSkills(
 
     try {
       tempDir = await cloneRepo(sourceUrl, ref);
-      const discovered = await discoverSkills(tempDir);
+      const discovered = await discoverSkills(tempDir, undefined, { fullDepth: true });
 
       const discoveredPaths = discovered.map((s) => {
         const relPath = relative(tempDir!, s.path);
@@ -694,6 +721,11 @@ export async function updateProjectSkills(
     const subagentSkills = remainingSkills.filter((skill) => skill.entry.subagents?.length);
 
     if (normalSkills.length > 0) {
+      // Group by repo (plain source + ref) so a single install refreshes every
+      // locked skill from that repo, instead of re-installing once per skill
+      // folder. Skills outside the standard discovery locations (or from
+      // sources without subpath support) force full-depth discovery so the
+      // batched install can still find them.
       const normalGroups = new Map<string, typeof normalSkills>();
       for (const skill of normalSkills) {
         const installSource = buildLocalUpdateSource(skill.entry);
@@ -704,9 +736,13 @@ export async function updateProjectSkills(
           );
           continue;
         }
-        const existing = normalGroups.get(installSource) || [];
+        const repoSource = formatSourceInput(
+          skill.entry.sourceUrl || skill.entry.source,
+          skill.entry.ref
+        );
+        const existing = normalGroups.get(repoSource) || [];
         existing.push(skill);
-        normalGroups.set(installSource, existing);
+        normalGroups.set(repoSource, existing);
       }
 
       for (const [installSource, skillsForInstallSource] of normalGroups) {
@@ -721,6 +757,10 @@ export async function updateProjectSkills(
             skill: skillNames,
             agent: universalAgents,
             yes: true,
+            fullDepth: skillsForInstallSource.some(
+              (s) =>
+                shouldUseFullDepthForUpdate(s.entry) || !isStandardSkillLocation(s.entry.skillPath)
+            ),
           });
           successCount += skillNames.length;
           console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
@@ -752,6 +792,7 @@ export async function updateProjectSkills(
           skill: [skill.name],
           subagent: skill.entry.subagents!.map((s) => (s === '' ? 'root' : s)),
           yes: true,
+          fullDepth: shouldUseFullDepthForUpdate(skill.entry),
         });
         successCount++;
         console.log(`  ${TEXT}✓${RESET} Updated ${safeName}`);

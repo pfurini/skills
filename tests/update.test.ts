@@ -192,6 +192,41 @@ describe('Update Cleanup Unit Tests', () => {
       expect(remove.removeCommand).not.toHaveBeenCalled();
     });
 
+    it('uses full-depth discovery for project deletion checks', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'help-me-read': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'plugins/help-me-read/skills/help-me-read/SKILL.md',
+            computedHash: 'old-hash',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockImplementation(async (_path, _subpath, options) =>
+        options?.fullDepth
+          ? [
+              {
+                name: 'help-me-read',
+                path: '/tmp/repo/plugins/help-me-read/skills/help-me-read',
+                description: 'Deep skill',
+                rawContent: '',
+              },
+            ]
+          : []
+      );
+
+      await updateProjectSkills();
+
+      expect(skills.discoverSkills).toHaveBeenCalledWith('/tmp/repo', undefined, {
+        fullDepth: true,
+      });
+      expect(p.confirm).not.toHaveBeenCalled();
+      expect(remove.removeCommand).not.toHaveBeenCalled();
+    });
+
     it('uses sourceUrl for self-hosted GitLab project updates', async () => {
       vi.mocked(localLock.readLocalLock).mockResolvedValue({
         version: 1,
@@ -199,7 +234,7 @@ describe('Update Cleanup Unit Tests', () => {
           'skill-a': {
             source: 'acme/skills',
             sourceUrl: 'https://gitlab.example.com/acme/skills.git',
-            skillPath: 'skills/skill-a/SKILL.md',
+            skillPath: 'plugins/example/skills/skill-a/SKILL.md',
             sourceType: 'git',
             computedHash: 'abc',
           },
@@ -208,7 +243,12 @@ describe('Update Cleanup Unit Tests', () => {
 
       vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
       vi.mocked(skills.discoverSkills).mockResolvedValue([
-        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/plugins/example/skills/skill-a',
+          description: 'Deep skill',
+          rawContent: '',
+        },
       ]);
 
       await updateProjectSkills({ yes: true });
@@ -219,7 +259,37 @@ describe('Update Cleanup Unit Tests', () => {
       );
       expect(add.runAdd).toHaveBeenCalledWith(
         ['https://gitlab.example.com/acme/skills.git'],
-        expect.objectContaining({ skill: ['skill-a'] })
+        expect.objectContaining({ skill: ['skill-a'], fullDepth: true })
+      );
+    });
+
+    it('batches GitHub project updates per repo, using full-depth for deep skill paths', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'plugins/example/skills/skill-a/SKILL.md',
+            computedHash: 'abc',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/plugins/example/skills/skill-a',
+          description: 'Deep skill',
+          rawContent: '',
+        },
+      ]);
+
+      await updateProjectSkills({ yes: true });
+
+      expect(add.runAdd).toHaveBeenCalledWith(
+        ['owner/repo'],
+        expect.objectContaining({ skill: ['skill-a'], fullDepth: true })
       );
     });
 
@@ -292,14 +362,94 @@ describe('Update Cleanup Unit Tests', () => {
       );
     });
 
+    it('does not report a locked plugin skill as deleted when it exists in the GitHub tree', async () => {
+      vi.mocked(skillLock.readSkillLock).mockResolvedValue({
+        version: 3,
+        skills: {
+          'help-me-read': {
+            source: 'owner/repo',
+            sourceUrl: 'https://github.com/owner/repo.git',
+            sourceType: 'github',
+            skillPath: 'plugins/help-me-read/skills/help-me-read/SKILL.md',
+            skillFolderHash: 'deep-tree-sha',
+            installedAt: '',
+            updatedAt: '',
+          },
+        },
+      });
+      vi.mocked(blob.fetchRepoTree).mockResolvedValue({
+        sha: 'rootsha',
+        branch: 'main',
+        tree: [
+          { path: '.claude/skills/shallow/SKILL.md', type: 'blob', sha: 'shallow-blob' },
+          {
+            path: 'plugins/help-me-read/skills/help-me-read/SKILL.md',
+            type: 'blob',
+            sha: 'deep-blob',
+          },
+          {
+            path: 'plugins/help-me-read/skills/help-me-read',
+            type: 'tree',
+            sha: 'deep-tree-sha',
+          },
+        ],
+      });
+      vi.mocked(blob.findSkillMdPaths).mockReturnValue(['.claude/skills/shallow/SKILL.md']);
+      vi.mocked(p.confirm).mockResolvedValue(false);
+
+      await updateGlobalSkills();
+
+      expect(p.confirm).not.toHaveBeenCalled();
+      expect(remove.removeCommand).not.toHaveBeenCalled();
+    });
+
+    it('uses full-depth discovery for non-GitHub global deletion checks', async () => {
+      vi.mocked(skillLock.readSkillLock).mockResolvedValue({
+        version: 3,
+        skills: {
+          'deep-skill': {
+            source: 'git@gitea.example.com:owner/repo.git',
+            sourceUrl: 'git@gitea.example.com:owner/repo.git',
+            sourceType: 'git',
+            skillPath: 'plugins/example/skills/deep-skill/SKILL.md',
+            skillFolderHash: 'same-hash',
+            installedAt: '',
+            updatedAt: '',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockImplementation(async (_path, _subpath, options) =>
+        options?.fullDepth
+          ? [
+              {
+                name: 'deep-skill',
+                path: '/tmp/repo/plugins/example/skills/deep-skill',
+                description: 'Deep skill',
+                rawContent: '',
+              },
+            ]
+          : []
+      );
+      vi.mocked(localLock.computeSkillFolderHash).mockResolvedValue('same-hash');
+
+      await updateGlobalSkills();
+
+      expect(skills.discoverSkills).toHaveBeenCalledWith('/tmp/repo', undefined, {
+        fullDepth: true,
+      });
+      expect(p.confirm).not.toHaveBeenCalled();
+      expect(remove.removeCommand).not.toHaveBeenCalled();
+    });
+
     it('should check global non-GitHub git sources by cloning', async () => {
       vi.mocked(skillLock.readSkillLock).mockResolvedValue({
         version: 3,
         skills: {
           'skill-a': {
-            source: 'git@github.com:owner/repo.git',
-            sourceUrl: 'git@github.com:owner/repo.git',
-            skillPath: 'skills/skill-a/SKILL.md',
+            source: 'ssh://git@github.com/owner/repo',
+            sourceUrl: 'ssh://git@github.com/owner/repo',
+            skillPath: 'plugins/example/skills/skill-a/SKILL.md',
             sourceType: 'git',
             skillFolderHash: 'old-hash',
             installedAt: '',
@@ -310,15 +460,26 @@ describe('Update Cleanup Unit Tests', () => {
 
       vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
       vi.mocked(skills.discoverSkills).mockResolvedValue([
-        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/plugins/example/skills/skill-a',
+          description: 'Deep skill',
+          rawContent: '',
+        },
       ]);
       vi.mocked(localLock.computeSkillFolderHash).mockResolvedValue('new-hash');
 
       await updateGlobalSkills({ yes: true });
 
-      expect(git.cloneRepo).toHaveBeenCalledWith('git@github.com:owner/repo.git', undefined);
+      expect(git.cloneRepo).toHaveBeenCalledWith('ssh://git@github.com/owner/repo', undefined);
       expect(localLock.computeSkillFolderHash).toHaveBeenCalledWith(
-        join('/tmp/repo', 'skills/skill-a')
+        join('/tmp/repo', 'plugins/example/skills/skill-a')
+      );
+      // Generic git sources don't support appended subpaths, so the update
+      // re-installs from the plain source URL with full-depth discovery.
+      expect(add.runAdd).toHaveBeenCalledWith(
+        ['ssh://git@github.com/owner/repo'],
+        expect.objectContaining({ skill: ['skill-a'], global: true, fullDepth: true })
       );
     });
 

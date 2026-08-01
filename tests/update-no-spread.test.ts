@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { updateProjectSkills } from '../src/update.ts';
 import { runAdd } from '../src/add.ts';
 import { readLocalLock } from '../src/local-lock.ts';
+import { discoverSkills } from '../src/skills.ts';
 
 vi.mock('../src/add.ts', () => ({
   runAdd: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock('../src/agents.ts', () => ({
     cursor: { displayName: 'Cursor', skillsDir: '.cursor/skills' },
   },
   getUniversalAgents: vi.fn(() => ['universal']),
+  isUniversalAgent: vi.fn((type: string) => type === 'universal'),
 }));
 
 // The deletion-check clones the source repo; keep it hermetic (no network/fs).
@@ -58,11 +60,22 @@ describe('updateProjectSkills no spread to agent-specific folders', () => {
           source: 'vercel-labs/skills',
           sourceType: 'github',
           ref: 'main',
+          skillPath: 'skills/my-skill/SKILL.md',
           computedHash: 'a'.repeat(64),
         },
       },
     });
 
+    // Mirror the locked skillPath in the cloned repo so the deletion check
+    // does not treat the skill as removed upstream.
+    vi.mocked(discoverSkills).mockResolvedValue([
+      {
+        name: 'my-skill',
+        path: '/tmp/skills-update-clone/skills/my-skill',
+        description: 'A',
+        rawContent: '',
+      },
+    ]);
     vi.mocked(runAdd).mockImplementation(async (_source, options) => {
       const skillNames = options?.skill ?? [];
       const agents = options?.agent ?? [];

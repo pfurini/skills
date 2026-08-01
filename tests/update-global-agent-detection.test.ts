@@ -56,7 +56,10 @@ describe('updateGlobalSkills agent detection', () => {
 
     // The skill folder changed upstream (old-hash -> new-hash), and it is still
     // present in the repo tree (so it is not treated as a deletion).
-    vi.mocked(fetchRepoTree).mockResolvedValue({ sha: 'tree-sha' } as never);
+    vi.mocked(fetchRepoTree).mockResolvedValue({
+      sha: 'tree-sha',
+      tree: [{ path: 'skills/gh-cli/SKILL.md', type: 'blob' }],
+    } as never);
     vi.mocked(findSkillMdPaths).mockReturnValue(['skills/gh-cli/SKILL.md']);
     vi.mocked(getSkillFolderHashFromTree).mockReturnValue('new-hash');
 
@@ -75,6 +78,7 @@ describe('updateGlobalSkills agent detection', () => {
       agent: ['claude-code'],
       global: true,
       yes: true,
+      fullDepth: false,
     });
   });
 });

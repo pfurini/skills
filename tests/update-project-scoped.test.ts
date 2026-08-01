@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { updateProjectSkills } from '../src/update.ts';
 import { runAdd } from '../src/add.ts';
 import { readLocalLock } from '../src/local-lock.ts';
+import { discoverSkills } from '../src/skills.ts';
 
 vi.mock('../src/add.ts', () => ({
   runAdd: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('../src/agents.ts', () => ({
     codex: { displayName: 'Codex', skillsDir: '.agents/skills' },
   },
   getUniversalAgents: vi.fn(() => ['claude-code', 'codex']),
+  isUniversalAgent: vi.fn(() => true),
 }));
 
 // The deletion-check clones the source repo; keep it hermetic (no network/fs).
@@ -42,12 +44,14 @@ describe('updateProjectSkills', () => {
           source: 'vercel-labs/skills',
           ref: 'main',
           sourceType: 'github',
+          skillPath: 'skills/skill-one/SKILL.md',
           computedHash: 'a'.repeat(64),
         },
         'skill-two': {
           source: 'vercel-labs/skills',
           ref: 'main',
           sourceType: 'github',
+          skillPath: 'skills/skill-two/SKILL.md',
           computedHash: 'b'.repeat(64),
         },
         'sync-skill': {
@@ -58,6 +62,23 @@ describe('updateProjectSkills', () => {
       },
     });
 
+    // The deletion check compares locked skillPaths against paths discovered
+    // in the cloned repo; mirror the locked layout so nothing looks deleted.
+    vi.mocked(discoverSkills).mockResolvedValue([
+      {
+        name: 'skill-one',
+        path: '/tmp/skills-update-clone/skills/skill-one',
+        description: 'One',
+        rawContent: '',
+      },
+      {
+        name: 'skill-two',
+        path: '/tmp/skills-update-clone/skills/skill-two',
+        description: 'Two',
+        rawContent: '',
+      },
+    ]);
+
     const result = await updateProjectSkills();
 
     expect(result).toEqual({ successCount: 2, failCount: 0, foundCount: 2 });
@@ -66,6 +87,7 @@ describe('updateProjectSkills', () => {
       skill: ['skill-one', 'skill-two'],
       agent: ['claude-code', 'codex'],
       yes: true,
+      fullDepth: false,
     });
   });
 });

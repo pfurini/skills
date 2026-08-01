@@ -6,7 +6,7 @@ import { agents, detectInstalledAgents, getEveSubagents } from './agents.ts';
 import { track } from './telemetry.ts';
 import { detectAgent } from './detect-agent.ts';
 import { removeSkillFromLock, getSkillFromLock, readSkillLock } from './skill-lock.ts';
-import { removeSkillFromLocalLock, readLocalLock } from './local-lock.ts';
+import { readLocalLock, removeSkillFromLocalLock } from './local-lock.ts';
 import type { AgentType } from './types.ts';
 import {
   getInstallPath,
@@ -21,6 +21,41 @@ export interface RemoveOptions {
   agent?: string[];
   yes?: boolean;
   all?: boolean;
+}
+
+/**
+ * Resolve requested skill names to canonical removal targets.
+ *
+ * On-disk folder names are the result of sanitizeName() at install time, but
+ * lock-file keys keep the original name, which may contain characters
+ * sanitizeName() rewrites — e.g. the ':' in plugin skills such as "ce:review"
+ * maps to the folder "ce-review". Matching purely on folder names therefore
+ * misses lock-only or name-mismatched skills (and stale lock entries whose
+ * folder is already gone). Every candidate is canonicalized by its sanitized
+ * name, preferring the lock key, so downstream disk cleanup (which
+ * re-sanitizes) and lock removal (which needs the exact key) both target the
+ * right thing.
+ */
+export function resolveSkillsToRemove(
+  requested: string[],
+  folderNames: string[],
+  lockKeys: string[] = []
+): string[] {
+  const identityBySanitized = new Map<string, string>();
+  for (const folder of folderNames) {
+    identityBySanitized.set(sanitizeName(folder), folder);
+  }
+  // Lock keys win: they carry the exact key needed for lock removal.
+  for (const key of lockKeys) {
+    identityBySanitized.set(sanitizeName(key), key);
+  }
+
+  const matched = new Set<string>();
+  for (const name of requested) {
+    const hit = identityBySanitized.get(sanitizeName(name));
+    if (hit) matched.add(hit);
+  }
+  return Array.from(matched);
 }
 
 export async function removeCommand(skillNames: string[], options: RemoveOptions) {
@@ -78,25 +113,35 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
 
   const installedSkills = Array.from(skillNamesSet).sort();
 
-  // In global mode the lock can hold entries whose files are already gone
-  // (dangling). Surface those so `remove -g <name>` (and `--all`) can still
-  // purge the orphaned lock entry even when nothing is left on disk.
-  let lockOnlySkills: string[] = [];
-  if (isGlobal) {
-    const lock = await readSkillLock();
-    lockOnlySkills = Object.keys(lock.skills).filter(
-      (name) => !skillNamesSet.has(name) && !skillNamesSet.has(sanitizeName(name))
-    );
-  }
-  const lockOnlySet = new Set(lockOnlySkills);
-  const removableSkills = Array.from(new Set([...installedSkills, ...lockOnlySkills])).sort();
+  // Read lock file keys up front. These are needed both to decide whether there is
+  // anything to remove (a skill may be missing from disk but still leave a stale lock
+  // entry) and to clean up those stale entries below.
+  const lockSkillsKeys = isGlobal
+    ? Object.keys((await readSkillLock()).skills)
+    : Object.keys((await readLocalLock(cwd)).skills);
+
+  // Dangling lock entries: tracked in the lock but with no files left on disk.
+  // Surfaced in the interactive picker so they can be purged without knowing
+  // their names up front.
+  const danglingLockSkills = lockSkillsKeys.filter(
+    (key) => !skillNamesSet.has(key) && !skillNamesSet.has(sanitizeName(key))
+  );
+  const danglingLockSet = new Set(danglingLockSkills);
 
   spinner.stop(
     `Found ${installedSkills.length} installed skill(s)` +
-      (lockOnlySkills.length > 0 ? ` and ${lockOnlySkills.length} dangling lock entry(ies)` : '')
+      (danglingLockSkills.length > 0
+        ? ` and ${danglingLockSkills.length} dangling lock entry(ies)`
+        : '')
   );
 
-  if (removableSkills.length === 0) {
+  const requestedSkills = options.all ? [...installedSkills, ...lockSkillsKeys] : skillNames;
+  const resolvedRequestedSkills =
+    options.all || skillNames.length > 0
+      ? resolveSkillsToRemove(requestedSkills, installedSkills, lockSkillsKeys)
+      : [];
+
+  if (installedSkills.length === 0 && resolvedRequestedSkills.length === 0) {
     p.outro(pc.yellow('No skills found to remove.'));
     return;
   }
@@ -116,21 +161,19 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
   let selectedSkills: string[] = [];
 
   if (options.all) {
-    selectedSkills = removableSkills;
+    selectedSkills = resolvedRequestedSkills;
   } else if (skillNames.length > 0) {
-    selectedSkills = removableSkills.filter((s) =>
-      skillNames.some((name) => name.toLowerCase() === s.toLowerCase())
-    );
+    selectedSkills = resolvedRequestedSkills;
 
     if (selectedSkills.length === 0) {
       p.log.error(`No matching skills found for: ${skillNames.join(', ')}`);
       return;
     }
   } else {
-    const choices = removableSkills.map((s) => ({
+    const choices = [...installedSkills, ...danglingLockSkills].sort().map((s) => ({
       value: s,
       label: s,
-      ...(lockOnlySet.has(s) ? { hint: 'lock entry — files not on disk' } : {}),
+      ...(danglingLockSet.has(s) ? { hint: 'lock entry — files not on disk' } : {}),
     }));
 
     const selected = await p.multiselect({
@@ -144,7 +187,7 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
       process.exit(0);
     }
 
-    selectedSkills = selected as string[];
+    selectedSkills = resolveSkillsToRemove(selected as string[], installedSkills, lockSkillsKeys);
   }
 
   let targetAgents: AgentType[];
@@ -252,20 +295,17 @@ export async function removeCommand(skillNames: string[], options: RemoveOptions
 
       let effectiveSource = 'local';
       let effectiveSourceType = 'local';
+
       if (isGlobal) {
         const lockEntry = await getSkillFromLock(skillName);
         effectiveSource = lockEntry?.source || 'local';
         effectiveSourceType = lockEntry?.sourceType || 'local';
-      } else {
-        const localLock = await readLocalLock(cwd);
-        const localEntry = localLock.skills[skillName];
-        effectiveSource = localEntry?.source || 'local';
-        effectiveSourceType = localEntry?.sourceType || 'local';
-      }
-
-      if (isGlobal) {
         await removeSkillFromLock(skillName);
       } else {
+        const localLock = await readLocalLock(cwd);
+        const lockEntry = localLock.skills[skillName];
+        effectiveSource = lockEntry?.source || 'local';
+        effectiveSourceType = lockEntry?.sourceType || 'local';
         await removeSkillFromLocalLock(skillName, cwd);
       }
 
