@@ -570,6 +570,63 @@ describe('Update Cleanup Unit Tests', () => {
       expect(process.env.GH_HOST).toBe('github.example.com');
     });
 
+    it('restores GH_HOST when a pinned project update fails', async () => {
+      vi.stubEnv('GH_HOST', 'github.example.com');
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            skillPath: 'skills/skill-a/SKILL.md',
+            sourceType: 'github',
+            computedHash: 'abc',
+          },
+        },
+      });
+
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+      ]);
+      vi.mocked(add.runAdd).mockImplementation(async () => {
+        process.exit(1);
+      });
+
+      const result = await updateProjectSkills({ yes: true });
+
+      expect(result.failCount).toBe(1);
+      expect(process.env.GH_HOST).toBe('github.example.com');
+    });
+
+    it('reinstalls Eve subagent skills into their recorded subagents only', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            skillPath: 'skills/skill-a/SKILL.md',
+            sourceType: 'github',
+            computedHash: 'abc',
+            subagents: ['', 'research'],
+          },
+        },
+      });
+
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+      ]);
+
+      await updateProjectSkills({ yes: true });
+
+      // The lock stores '' for the Eve root agent; `add --subagent` calls it `root`.
+      expect(add.runAdd).toHaveBeenCalledWith(
+        ['owner/repo/skills/skill-a'],
+        expect.objectContaining({ skill: ['skill-a'], subagent: ['root', 'research'] })
+      );
+      expect(vi.mocked(add.runAdd).mock.calls[0]![1]).not.toHaveProperty('agent');
+    });
+
     it('does not reinterpret generic git shorthands as GitHub during project update', async () => {
       vi.mocked(localLock.readLocalLock).mockResolvedValue({
         version: 1,

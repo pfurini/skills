@@ -84,7 +84,7 @@ tests/
 3. For each skill, call `fetchSkillFolderHash(source, skillPath, token)`. Tree requests start anonymously, then use an explicit `GITHUB_TOKEN`/`GH_TOKEN`, then `gh api` without exporting the GitHub CLI credential.
 4. `fetchSkillFolderHash` calls the GitHub Trees API (`/git/trees/<branch>?recursive=1` for `main`, then `master` fallback); update checks fall back to an authenticated Git clone when API access is unavailable.
 5. Compare latest folder tree SHA with lock file `skillFolderHash`; mismatch means update available
-6. `skills update` reinstalls changed skills by invoking the current CLI entrypoint directly (`node <repo>/bin/cli.mjs add <source-tree-url> -g -y`) to avoid nested npm exec/npx behavior
+6. `skills update` reinstalls changed skills in-process through `runAdd` (`runAddIsolated` in `src/update.ts` turns a `process.exit()` into a per-skill failure). Global updates reinstall only to the agents that already have the skill. Project updates install each changed skill from its locked folder, into the universal agent dirs or its recorded Eve subagents.
 
 ### Lock File Compatibility
 
