@@ -440,20 +440,35 @@ export async function processWellKnownUpdates(
 
     for (const name of result.changedSkills) {
       const safeName = sanitizeMetadata(name);
+
+      // Scope the reinstall like the GitHub and git update paths: a global
+      // update goes only to the agents that already have the skill; a project
+      // update goes to the recorded Eve subagents or the universal agent dir(s).
+      let destination: { agent: AgentType[] } | { subagent: string[] };
+      if (isGlobal) {
+        const detectedAgents = await detectInstalledAgentsForSkill(name);
+        if (detectedAgents.length === 0) {
+          console.log(
+            `  ${DIM}Skipping ${safeName}: not installed in any global agent directory${RESET}`
+          );
+          continue;
+        }
+        destination = { agent: detectedAgents };
+      } else {
+        const subagents = itemByName.get(name)?.subagents;
+        destination = subagents?.length
+          ? { subagent: subagents.map((s) => (s === '' ? 'root' : s)) }
+          : { agent: getUniversalAgents() };
+      }
+
       console.log(`${TEXT}Updating ${safeName}…${RESET}`);
 
       // Install in-process like the other update paths. Spawning bin/cli.mjs
       // would run the built dist/ (stale or missing when running from source).
-      const subagents = itemByName.get(name)?.subagents;
-      const subagentOption =
-        !isGlobal && subagents?.length
-          ? { subagent: subagents.map((s) => (s === '' ? 'root' : s)) }
-          : {};
-
       try {
         await runAddIsolated([baseUrl], {
           skill: [name],
-          ...subagentOption,
+          ...destination,
           ...(isGlobal ? { global: true } : {}),
           yes: true,
         });

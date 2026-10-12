@@ -5,6 +5,8 @@ import {
   type WellKnownUpdateItem,
 } from '../src/update.ts';
 import { runAdd } from '../src/add.ts';
+import { getUniversalAgents } from '../src/agents.ts';
+import { isSkillInstalled } from '../src/installer.ts';
 import {
   computeWellKnownSkillDigest,
   wellKnownProvider,
@@ -81,11 +83,16 @@ async function digestOf(name: string, contents = V1_CONTENTS): Promise<string> {
 }
 
 vi.mock('../src/add.ts', () => ({ runAdd: vi.fn() }));
+vi.mock('../src/installer.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/installer.ts')>()),
+  isSkillInstalled: vi.fn(async () => false),
+}));
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.mocked(runAdd).mockReset();
+  vi.mocked(isSkillInstalled).mockReset().mockResolvedValue(false);
 });
 
 describe('computeWellKnownSkillDigest', () => {
@@ -267,20 +274,42 @@ describe('checkWellKnownForUpdates', () => {
 });
 
 describe('processWellKnownUpdates', () => {
-  function changedAlpha(): Map<string, WellKnownUpdateItem[]> {
+  function changedAlpha(subagents?: string[]): Map<string, WellKnownUpdateItem[]> {
     stubWellKnownServer(v2Index([{ name: 'alpha-skill', digest: DIGEST_A }]));
-    return new Map([
-      [BASE_URL, [{ name: 'alpha-skill', digest: DIGEST_STALE, subagents: ['', 'research'] }]],
-    ]);
+    return new Map([[BASE_URL, [{ name: 'alpha-skill', digest: DIGEST_STALE, subagents }]]]);
   }
 
-  it('reinstalls a changed project skill in-process into its recorded subagents', async () => {
+  function silenceOutput(): void {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  }
+
+  function installedGloballyFor(...agents: string[]): void {
+    vi.mocked(isSkillInstalled).mockImplementation(async (_name, agent) => agents.includes(agent));
+  }
+
+  it('reinstalls a changed project skill into the universal agent dir(s) only', async () => {
+    silenceOutput();
 
     const result = await processWellKnownUpdates(changedAlpha(), false, { yes: true });
 
     expect(result).toEqual({ successCount: 1, failCount: 0, changed: true });
+    expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
+      skill: ['alpha-skill'],
+      agent: getUniversalAgents(),
+      yes: true,
+    });
+  });
+
+  it('reinstalls a changed project skill into its recorded Eve subagents', async () => {
+    silenceOutput();
+
+    const result = await processWellKnownUpdates(changedAlpha(['', 'research']), false, {
+      yes: true,
+    });
+
+    expect(result).toEqual({ successCount: 1, failCount: 0, changed: true });
+    // The lock stores '' for the Eve root agent; `add --subagent` calls it `root`.
     expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
       skill: ['alpha-skill'],
       subagent: ['root', 'research'],
@@ -288,9 +317,36 @@ describe('processWellKnownUpdates', () => {
     });
   });
 
+  it('reinstalls a changed global skill only to the agents that already have it', async () => {
+    silenceOutput();
+    installedGloballyFor('claude-code');
+
+    const result = await processWellKnownUpdates(changedAlpha(['', 'research']), true, {
+      yes: true,
+    });
+
+    expect(result).toEqual({ successCount: 1, failCount: 0, changed: true });
+    // Global installs never carry Eve subagent placement.
+    expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
+      skill: ['alpha-skill'],
+      agent: ['claude-code'],
+      global: true,
+      yes: true,
+    });
+  });
+
+  it('skips a changed global skill that no global agent dir contains', async () => {
+    silenceOutput();
+
+    const result = await processWellKnownUpdates(changedAlpha(), true, { yes: true });
+
+    expect(result).toEqual({ successCount: 0, failCount: 0, changed: true });
+    expect(runAdd).not.toHaveBeenCalled();
+  });
+
   it('counts a failed global reinstall without ending the run', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    silenceOutput();
+    installedGloballyFor('claude-code');
     vi.mocked(runAdd).mockImplementation(async () => {
       process.exit(1);
     });
@@ -298,11 +354,5 @@ describe('processWellKnownUpdates', () => {
     const result = await processWellKnownUpdates(changedAlpha(), true, { yes: true });
 
     expect(result).toEqual({ successCount: 0, failCount: 1, changed: true });
-    // Global installs never carry Eve subagent placement.
-    expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
-      skill: ['alpha-skill'],
-      global: true,
-      yes: true,
-    });
   });
 });
