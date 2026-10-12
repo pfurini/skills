@@ -9,11 +9,18 @@ import {
   formatSourceInput,
   buildUpdateInstallSource,
   buildLocalUpdateSource,
+  buildLocalCloneSource,
   shouldUseFullDepthForUpdate,
 } from './update-source.ts';
-import { cloneRepo, cleanupTempDir } from './git.ts';
+import { cloneRepo, cleanupTempDir, getGitTreeHash } from './git.ts';
 import { discoverSkills } from './skills.ts';
 import { fetchRepoTree, getSkillFolderHashFromTree } from './blob.ts';
+import {
+  resolveSkillLocations,
+  type DiscoveredSkillLocation,
+  type SkillLocationResolution,
+  type SkillLocationResolutionOptions,
+} from './skill-relocation.ts';
 import { wellKnownProvider, computeWellKnownSkillDigest } from './providers/index.ts';
 import { removeCommand } from './remove.ts';
 import { sanitizeMetadata } from './sanitize.ts';
@@ -40,6 +47,15 @@ export interface UpdateCheckOptions {
   yes?: boolean;
   /** Optional skill name(s) to filter on (positional args) */
   skills?: string[];
+}
+
+/**
+ * Public GitHub lock entries use owner/repo shorthand to preserve the exact
+ * skill subpath. Pin that shorthand to github.com so an ambient GH_HOST for a
+ * GitHub Enterprise account cannot redirect an existing public installation.
+ */
+function shouldPinGitHubHost(sourceType?: string): boolean {
+  return sourceType === 'github';
 }
 
 export function parseUpdateOptions(args: string[]): UpdateCheckOptions {
@@ -279,16 +295,28 @@ export async function checkAndPromptForDeletions(
   lockSkills: Record<string, { skillPath?: string }>,
   isGlobal: boolean,
   options: UpdateCheckOptions,
-  discoveredPaths: string[]
-): Promise<string[]> {
-  const deletedSkills = allLockedForSource.filter((name) => {
-    const entry = lockSkills[name];
-    if (!entry?.skillPath) return false;
-    return !discoveredPaths.includes(entry.skillPath);
-  });
+  discovered: DiscoveredSkillLocation[],
+  locationOptions: SkillLocationResolutionOptions = {}
+): Promise<SkillLocationResolution> {
+  const resolution = resolveSkillLocations(
+    allLockedForSource,
+    lockSkills,
+    discovered,
+    locationOptions
+  );
 
-  await promptDeletions(source, deletedSkills, isGlobal, options);
-  return deletedSkills;
+  if (resolution.ambiguousSkills.length > 0) {
+    console.log();
+    console.log(
+      `${DIM}Warning:${RESET} Multiple current paths match these skills from ${DIM}${source}${RESET}; skipping them rather than deleting or migrating the wrong skill:`
+    );
+    for (const name of resolution.ambiguousSkills) {
+      console.log(`  ${DIM}•${RESET} ${sanitizeMetadata(name)}`);
+    }
+  }
+
+  await promptDeletions(source, resolution.deletedSkills, isGlobal, options);
+  return resolution;
 }
 
 export interface WellKnownUpdateItem {
@@ -476,20 +504,6 @@ async function detectInstalledAgentsForSkill(skillName: string): Promise<AgentTy
 }
 
 /**
- * Whether a SKILL.md path is discoverable from the repo root without
- * --full-depth: anything under the root `skills/` container (walked deep by
- * discoverSkills), or a depth-1 folder at the root. Deep paths (e.g.
- * plugins/<name>/skills/<skill>/SKILL.md) require full-depth discovery when
- * the install is batched per repo instead of targeted by appended subpath.
- */
-function isStandardSkillLocation(skillPath?: string): boolean {
-  if (!skillPath) return true;
-  const normalized = skillPath.split(sep).join('/');
-  if (normalized.startsWith('skills/')) return true;
-  return normalized.split('/').length === 2;
-}
-
-/**
  * Thrown to translate a `process.exit()` call inside `runAdd` into a catchable
  * error so a single failed install does not tear down the whole update run.
  */
@@ -505,16 +519,25 @@ class RunAddExitError extends Error {
 /**
  * Run `runAdd` in-process while intercepting any `process.exit()` it performs,
  * turning a non-zero exit into a thrown error instead of killing the CLI.
+ * GitHub-sourced updates run with GH_HOST pinned to github.com (see
+ * shouldPinGitHubHost); the previous value is restored afterwards.
  */
 async function runAddIsolated(
   args: string[],
-  options: Parameters<typeof runAdd>[1]
+  options: Parameters<typeof runAdd>[1],
+  sourceType?: string
 ): Promise<void> {
   const originalExit = process.exit;
   process.exit = ((code?: number | string | null | undefined): never => {
     const numeric = typeof code === 'number' ? code : code == null ? 0 : Number(code) || 0;
     throw new RunAddExitError(numeric);
   }) as typeof process.exit;
+
+  const pinGitHubHost = shouldPinGitHubHost(sourceType);
+  const originalGhHost = process.env.GH_HOST;
+  if (pinGitHubHost) {
+    process.env.GH_HOST = 'github.com';
+  }
 
   try {
     await runAdd(args, options);
@@ -526,6 +549,13 @@ async function runAddIsolated(
     throw err;
   } finally {
     process.exit = originalExit;
+    if (pinGitHubHost) {
+      if (originalGhHost === undefined) {
+        delete process.env.GH_HOST;
+      } else {
+        process.env.GH_HOST = originalGhHost;
+      }
+    }
   }
 }
 
@@ -589,16 +619,21 @@ export async function updateGlobalSkills(
   successCount += wkSuccessCount;
   failCount += wkFailCount;
 
+  // Key by source AND ref: two skills from the same repo pinned to different
+  // refs must each be checked against their own ref's tree. Grouping by source
+  // alone checks the whole group against the first entry's ref, which falsely
+  // reports the other-ref skills as deleted upstream (and then removes them).
   const bySource = new Map<string, typeof checkable>();
   for (const item of checkable) {
-    const source = item.entry.source;
-    const existing = bySource.get(source) || [];
+    const key = `${item.entry.source}\n${item.entry.ref ?? ''}`;
+    const existing = bySource.get(key) || [];
     existing.push(item);
-    bySource.set(source, existing);
+    bySource.set(key, existing);
   }
 
-  for (const [source, itemsForSource] of bySource) {
+  for (const [, itemsForSource] of bySource) {
     const firstEntry = itemsForSource[0]!.entry;
+    const source = firstEntry.source;
     const sourceUrl = firstEntry.sourceUrl || firstEntry.source;
     let tempDir: string | null = null;
 
@@ -610,73 +645,80 @@ export async function updateGlobalSkills(
       if (isGitHubSource) {
         const tree = await fetchRepoTree(source, firstEntry.ref, getGitHubToken);
 
-        if (!tree) {
-          console.log(`  ${DIM}✗ Failed to fetch tree for ${source}${RESET}`);
-          continue;
-        }
+        if (tree) {
+          const discoveredPaths = tree.tree
+            .filter((entry) => entry.type === 'blob')
+            .map((entry) => entry.path);
 
-        const discoveredPaths = tree.tree
-          .filter((entry) => entry.type === 'blob')
-          .map((entry) => entry.path);
+          const allLockedForSource = Object.entries(lock.skills)
+            .filter(([_, entry]) => entry.source === source && entry.ref === firstEntry.ref)
+            .map(([name, _]) => name);
 
-        const allLockedForSource = Object.entries(lock.skills)
-          .filter(([_, entry]) => entry.source === source)
-          .map(([name, _]) => name);
+          const hasMissingLockedPath = allLockedForSource.some(
+            (name) =>
+              lock.skills[name]?.skillPath &&
+              !discoveredPaths.includes(lock.skills[name]!.skillPath!)
+          );
 
-        const deletedSkills = await checkAndPromptForDeletions(
-          source,
-          allLockedForSource,
-          lock.skills,
-          true,
-          options,
-          discoveredPaths
-        );
+          if (!hasMissingLockedPath) {
+            for (const { name: skillName, entry } of itemsForSource) {
+              const latestHash = getSkillFolderHashFromTree(tree, entry.skillPath!);
+              if (latestHash && latestHash !== entry.skillFolderHash) {
+                updates.push({ name: skillName, source, entry });
+              }
+            }
 
-        const deletedSkillSet = new Set(deletedSkills);
-
-        for (const { name: skillName, entry } of itemsForSource) {
-          if (deletedSkillSet.has(skillName)) continue;
-
-          const latestHash = getSkillFolderHashFromTree(tree, entry.skillPath!);
-          if (latestHash && latestHash !== entry.skillFolderHash) {
-            updates.push({ name: skillName, source, entry });
+            continue;
           }
-        }
 
-        continue;
+          console.log(`  ${DIM}Skill paths changed; resolving via Git clone${RESET}`);
+        } else {
+          console.log(`  ${DIM}GitHub API unavailable; checking via Git clone${RESET}`);
+        }
       }
 
       tempDir = await cloneRepo(sourceUrl, firstEntry.ref);
-      const discoveredPaths = (await discoverSkills(tempDir, undefined, { fullDepth: true })).map(
-        (skill) => {
-          return join(relative(tempDir!, skill.path), 'SKILL.md').split(sep).join('/');
-        }
-      );
+      const discovered = await discoverSkills(tempDir, undefined, {
+        fullDepth: true,
+        includeDuplicateNames: true,
+      });
+      const discoveredLocations = discovered.map((skill) => ({
+        name: skill.name,
+        skillPath: join(relative(tempDir!, skill.path), 'SKILL.md').split(sep).join('/'),
+      }));
 
       const allLockedForSource = Object.entries(lock.skills)
-        .filter(([_, entry]) => entry.source === source)
+        .filter(([_, entry]) => entry.source === source && entry.ref === firstEntry.ref)
         .map(([name, _]) => name);
 
-      const deletedSkills = await checkAndPromptForDeletions(
+      const resolution = await checkAndPromptForDeletions(
         source,
         allLockedForSource,
         lock.skills,
         true,
         options,
-        discoveredPaths
+        discoveredLocations,
+        // Path-addressable sources reinstall only the locked directory, so a
+        // same-name mirror elsewhere in the repo is not ambiguous. Generic Git
+        // sources reinstall from the whole repo and remain fail-closed.
+        { exactPathDisambiguates: !shouldUseFullDepthForUpdate(firstEntry) }
       );
 
-      const deletedSkillSet = new Set(deletedSkills);
+      const deletedSkillSet = new Set(resolution.deletedSkills);
 
       for (const { name: skillName, entry } of itemsForSource) {
         if (deletedSkillSet.has(skillName)) continue;
 
-        const skillPath = entry.skillPath!;
-        if (!discoveredPaths.includes(skillPath)) continue;
+        const skillPath = resolution.resolvedPaths.get(skillName);
+        if (!skillPath) continue;
 
-        const latestHash = await computeSkillFolderHash(join(tempDir, dirname(skillPath)));
-        if (latestHash && latestHash !== entry.skillFolderHash) {
-          updates.push({ name: skillName, source, entry });
+        const usesGitTreeHash = isGitHubSource && /^[0-9a-f]{40}$/i.test(entry.skillFolderHash);
+        const latestHash = usesGitTreeHash
+          ? await getGitTreeHash(tempDir, skillPath)
+          : await computeSkillFolderHash(join(tempDir, dirname(skillPath)));
+        const relocated = skillPath !== entry.skillPath;
+        if (relocated || (latestHash && latestHash !== entry.skillFolderHash)) {
+          updates.push({ name: skillName, source, entry: { ...entry, skillPath } });
         }
       }
     } catch (error) {
@@ -723,6 +765,7 @@ export async function updateGlobalSkills(
   // agents that actually have each skill, so we only re-install where it lives.
   interface GlobalUpdateGroup {
     source: string;
+    sourceType: string;
     agents: AgentType[];
     skills: string[];
     needsFullDepth: boolean;
@@ -747,7 +790,7 @@ export async function updateGlobalSkills(
     }
 
     const sortedAgents = [...detectedAgents].sort();
-    const key = `${installSource}::${sortedAgents.join(',')}`;
+    const key = `${update.entry.sourceType}::${installSource}::${sortedAgents.join(',')}`;
     const existing = groups.get(key);
 
     if (existing) {
@@ -756,6 +799,7 @@ export async function updateGlobalSkills(
     } else {
       groups.set(key, {
         source: installSource,
+        sourceType: update.entry.sourceType,
         agents: sortedAgents,
         skills: [update.name],
         needsFullDepth: shouldUseFullDepthForUpdate(update.entry),
@@ -794,13 +838,17 @@ export async function updateGlobalSkills(
     console.log(`${TEXT}Updating ${skillList}...${RESET}`);
 
     try {
-      await runAddIsolated([group.source], {
-        skill: group.skills,
-        agent: group.agents,
-        global: true,
-        yes: true,
-        fullDepth: group.needsFullDepth,
-      });
+      await runAddIsolated(
+        [group.source],
+        {
+          skill: group.skills,
+          agent: group.agents,
+          global: true,
+          yes: true,
+          fullDepth: group.needsFullDepth,
+        },
+        group.sourceType
+      );
       successCount += group.skills.length;
       console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
     } catch (error) {
@@ -886,7 +934,7 @@ export async function updateProjectSkills(
     console.log(`${TEXT}Updating for: ${targetParts.join(', ')}${RESET}`);
   }
 
-  console.log(`${TEXT}Refreshing ${updatable.length + wellKnownCount} skill(s)…${RESET}`);
+  console.log(`${TEXT}Checking ${updatable.length + wellKnownCount} skill(s)…${RESET}`);
   console.log();
 
   const { successCount: wkSuccessCount, failCount: wkFailCount } = await processWellKnownUpdates(
@@ -897,30 +945,37 @@ export async function updateProjectSkills(
   successCount += wkSuccessCount;
   failCount += wkFailCount;
 
+  // Key by source AND ref (see updateGlobalSkills) so skills from one repo
+  // pinned to different refs are each checked against their own ref's tree.
   const bySource = new Map<string, typeof updatable>();
   for (const skill of updatable) {
     const source = skill.entry.sourceUrl || skill.entry.source;
-    const existing = bySource.get(source) || [];
+    const key = `${source}\n${skill.entry.ref ?? ''}`;
+    const existing = bySource.get(key) || [];
     existing.push(skill);
-    bySource.set(source, existing);
+    bySource.set(key, existing);
   }
 
   const localLock = await readLocalLock();
   const universalAgents = getUniversalAgents();
+  let upToDateCount = 0;
 
-  for (const [source, skillsForSource] of bySource) {
+  for (const [, skillsForSource] of bySource) {
     const firstEntry = skillsForSource[0]!.entry;
-    const sourceUrl = firstEntry.sourceUrl || firstEntry.source;
+    const source = firstEntry.sourceUrl || firstEntry.source;
+    const cloneSource = buildLocalCloneSource(firstEntry);
     const ref = firstEntry.ref;
 
     const allLockedForSource = Object.entries(localLock.skills)
-      .filter(([_, entry]) => (entry.sourceUrl || entry.source) === source)
+      .filter(([_, entry]) => (entry.sourceUrl || entry.source) === source && entry.ref === ref)
       .map(([name, _]) => name);
 
     let tempDir: string | null = null;
     let deletedSkills: string[] = [];
+    let resolvedPaths: Map<string, string> | null = null;
+    const latestHashes = new Map<string, string>();
 
-    if (buildLocalUpdateSource(firstEntry) === null) {
+    if (cloneSource === null) {
       failCount += skillsForSource.length;
       console.log(
         `${DIM}✗ Cannot update ${source}: skills-lock.json is missing sourceUrl for this generic Git source${RESET}`
@@ -929,22 +984,39 @@ export async function updateProjectSkills(
     }
 
     try {
-      tempDir = await cloneRepo(sourceUrl, ref);
-      const discovered = await discoverSkills(tempDir, undefined, { fullDepth: true });
-
-      const discoveredPaths = discovered.map((s) => {
-        const relPath = relative(tempDir!, s.path);
-        return join(relPath, 'SKILL.md').split(sep).join('/');
+      tempDir = await cloneRepo(cloneSource, ref);
+      const discovered = await discoverSkills(tempDir, undefined, {
+        fullDepth: true,
+        includeDuplicateNames: true,
       });
 
-      deletedSkills = await checkAndPromptForDeletions(
+      const discoveredLocations = discovered.map((skill) => ({
+        name: skill.name,
+        skillPath: join(relative(tempDir!, skill.path), 'SKILL.md').split(sep).join('/'),
+      }));
+
+      const resolution = await checkAndPromptForDeletions(
         source,
         allLockedForSource,
         localLock.skills,
         false,
         options,
-        discoveredPaths
+        discoveredLocations,
+        { exactPathDisambiguates: !shouldUseFullDepthForUpdate(firstEntry) }
       );
+      deletedSkills = resolution.deletedSkills;
+      resolvedPaths = resolution.resolvedPaths;
+
+      // Hash each remaining skill in the clone the same way `add` records
+      // computedHash, so unchanged skills are not reinstalled.
+      for (const [name, skillPath] of resolution.resolvedPaths) {
+        try {
+          const hash = await computeSkillFolderHash(join(tempDir, dirname(skillPath)));
+          if (hash) latestHashes.set(name, hash);
+        } catch {
+          // Unknown hash: fall through to reinstalling the skill.
+        }
+      }
     } catch (error) {
       console.log(`${DIM}✗ Failed to check for deleted skills from ${source}${RESET}`);
     } finally {
@@ -953,67 +1025,28 @@ export async function updateProjectSkills(
       }
     }
 
-    const remainingSkills = skillsForSource.filter((s) => !deletedSkills.includes(s.name));
-    if (remainingSkills.length === 0) continue;
-
-    const normalSkills = remainingSkills.filter((skill) => !skill.entry.subagents?.length);
-    const subagentSkills = remainingSkills.filter((skill) => skill.entry.subagents?.length);
-
-    if (normalSkills.length > 0) {
-      // Group by repo (plain source + ref) so a single install refreshes every
-      // locked skill from that repo, instead of re-installing once per skill
-      // folder. Skills outside the standard discovery locations (or from
-      // sources without subpath support) force full-depth discovery so the
-      // batched install can still find them.
-      const normalGroups = new Map<string, typeof normalSkills>();
-      for (const skill of normalSkills) {
-        const installSource = buildLocalUpdateSource(skill.entry);
-        if (!installSource) {
-          failCount++;
-          console.log(
-            `  ${DIM}✗ Cannot update ${sanitizeMetadata(skill.name)}: skills-lock.json is missing sourceUrl for this generic Git source${RESET}`
-          );
-          continue;
-        }
-        const repoSource = formatSourceInput(
-          skill.entry.sourceUrl || skill.entry.source,
-          skill.entry.ref
-        );
-        const existing = normalGroups.get(repoSource) || [];
-        existing.push(skill);
-        normalGroups.set(repoSource, existing);
-      }
-
-      for (const [installSource, skillsForInstallSource] of normalGroups) {
-        const skillNames = skillsForInstallSource.map((s) => s.name);
-        const skillList = skillNames.map((s) => sanitizeMetadata(s)).join(', ');
-        console.log(`${TEXT}Updating ${skillList}...${RESET}`);
-
-        try {
-          // Target only the universal agent dir(s) so a project update never spreads
-          // into agent-specific folders (.claude, .cursor, …) that weren't installed.
-          await runAddIsolated([installSource], {
-            skill: skillNames,
-            agent: universalAgents,
-            yes: true,
-            fullDepth: skillsForInstallSource.some(
-              (s) =>
-                shouldUseFullDepthForUpdate(s.entry) || !isStandardSkillLocation(s.entry.skillPath)
-            ),
-          });
-          successCount += skillNames.length;
-          console.log(`  ${TEXT}✓${RESET} Updated ${skillList}`);
-        } catch (error) {
-          failCount += skillNames.length;
-          const message = error instanceof Error ? `: ${error.message}` : '';
-          console.log(`  ${DIM}✗ Failed to update ${skillList}${message}${RESET}`);
-        }
-      }
+    if (resolvedPaths === null) {
+      failCount += skillsForSource.length;
+      continue;
     }
 
-    for (const skill of subagentSkills) {
+    const remainingSkills = skillsForSource.filter((s) => !deletedSkills.includes(s.name));
+
+    for (const skill of remainingSkills) {
       const safeName = sanitizeMetadata(skill.name);
-      const installUrl = buildLocalUpdateSource(skill.entry);
+      const resolvedPath = resolvedPaths?.get(skill.name);
+      if (resolvedPaths && !resolvedPath) {
+        continue;
+      }
+      const entry = resolvedPath ? { ...skill.entry, skillPath: resolvedPath } : skill.entry;
+      const relocated = entry.skillPath !== skill.entry.skillPath;
+      const latestHash = latestHashes.get(skill.name);
+      if (!relocated && latestHash && latestHash === skill.entry.computedHash) {
+        upToDateCount++;
+        continue;
+      }
+      console.log(`${TEXT}Updating ${safeName}…${RESET}`);
+      const installUrl = buildLocalUpdateSource(entry);
       if (!installUrl) {
         failCount++;
         console.log(
@@ -1022,24 +1055,42 @@ export async function updateProjectSkills(
         continue;
       }
 
-      console.log(`${TEXT}Updating ${safeName}...${RESET}`);
+      // Preserve Eve subagent placement recorded at install time. The lock stores
+      // '' for the root agent, which maps to the `root` keyword for `add --subagent`.
+      // Every other skill targets only the universal agent dir(s), so a project
+      // update never spreads into agent-specific folders (.claude, .cursor, …)
+      // that weren't installed.
+      const subagents = skill.entry.subagents;
+      const destination = subagents?.length
+        ? { subagent: subagents.map((s) => (s === '' ? 'root' : s)) }
+        : { agent: universalAgents };
 
       try {
-        // Preserve Eve subagent placement recorded at install time. The lock stores
-        // '' for the root agent, which maps to the `root` keyword for `add --subagent`.
-        await runAddIsolated([installUrl], {
-          skill: [skill.name],
-          subagent: skill.entry.subagents!.map((s) => (s === '' ? 'root' : s)),
-          yes: true,
-          fullDepth: shouldUseFullDepthForUpdate(skill.entry),
-        });
+        await runAddIsolated(
+          [installUrl],
+          {
+            skill: [skill.name],
+            ...destination,
+            yes: true,
+            fullDepth: shouldUseFullDepthForUpdate(entry),
+          },
+          entry.sourceType
+        );
         successCount++;
         console.log(`  ${TEXT}✓${RESET} Updated ${safeName}`);
       } catch (error) {
         failCount++;
         const message = error instanceof Error ? `: ${error.message}` : '';
-        console.log(`  ${DIM}✗ Failed to update Eve subagents for ${safeName}${message}${RESET}`);
+        console.log(`  ${DIM}✗ Failed to update ${safeName}${message}${RESET}`);
       }
+    }
+  }
+
+  if (upToDateCount > 0) {
+    if (upToDateCount === updatable.length && wkSuccessCount === 0 && wkFailCount === 0) {
+      console.log(`${TEXT}✓ All project skills are up to date${RESET}`);
+    } else {
+      console.log(`${DIM}${upToDateCount} project skill(s) already up to date${RESET}`);
     }
   }
 

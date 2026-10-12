@@ -10,6 +10,8 @@ vi.mock('../src/add.ts', () => ({
 
 vi.mock('../src/local-lock.ts', () => ({
   readLocalLock: vi.fn(),
+  // Every locked skill differs from the clone, so none is skipped as up to date.
+  computeSkillFolderHash: vi.fn(async () => 'changed'),
 }));
 
 vi.mock('../src/agents.ts', () => ({
@@ -82,9 +84,17 @@ describe('updateProjectSkills', () => {
     const result = await updateProjectSkills();
 
     expect(result).toEqual({ successCount: 2, failCount: 0, foundCount: 2 });
-    expect(runAdd).toHaveBeenCalledTimes(1);
-    expect(runAdd).toHaveBeenCalledWith(['vercel-labs/skills#main'], {
-      skill: ['skill-one', 'skill-two'],
+    // Each skill installs from its locked folder, so a same-name copy elsewhere
+    // in the repo can never be picked instead.
+    expect(runAdd).toHaveBeenCalledTimes(2);
+    expect(runAdd).toHaveBeenCalledWith(['vercel-labs/skills/skills/skill-one#main'], {
+      skill: ['skill-one'],
+      agent: ['claude-code', 'codex'],
+      yes: true,
+      fullDepth: false,
+    });
+    expect(runAdd).toHaveBeenCalledWith(['vercel-labs/skills/skills/skill-two#main'], {
+      skill: ['skill-two'],
       agent: ['claude-code', 'codex'],
       yes: true,
       fullDepth: false,

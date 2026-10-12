@@ -20,22 +20,23 @@ describe('promptForAgents', () => {
     { value: 'opencode', label: 'OpenCode' },
     { value: 'cursor', label: 'Cursor' },
     { value: 'claude-code', label: 'Claude Code' },
+    { value: 'grok', label: 'Grok Build' },
   ];
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('should use default agents (claude-code, opencode, codex) when no history exists', async () => {
+  it('should use default agents (claude-code, opencode, codex, grok) when no history exists', async () => {
     vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(undefined);
     vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['opencode']);
 
     await promptForAgents('Select agents', choices);
 
-    // Should default to claude-code, opencode, codex (filtered by available choices)
+    // Should default to claude-code, opencode, codex, grok (filtered by available choices)
     expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialSelected: ['claude-code', 'opencode'],
+        initialSelected: ['claude-code', 'opencode', 'grok'],
       })
     );
   });
@@ -72,11 +73,11 @@ describe('promptForAgents', () => {
 
     await promptForAgents('Select agents', choices);
 
-    // When history is invalid, should fall back to defaults (claude-code, opencode, codex)
+    // When history is invalid, should fall back to defaults (claude-code, opencode, codex, grok)
     // filtered by available choices
     expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialSelected: ['claude-code', 'opencode'],
+        initialSelected: ['claude-code', 'opencode', 'grok'],
       })
     );
   });
@@ -103,16 +104,16 @@ describe('promptForAgents', () => {
 });
 
 describe('selectAgentsInteractive', () => {
-  // droid and augment are both non-universal agents; cursor is universal.
+  // claude-code and augment are both non-universal agents; cursor is universal.
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('should not pre-select a remembered agent that is not currently installed', async () => {
-    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid', 'augment']);
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['claude-code', 'augment']);
     vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['augment']);
 
-    // Only augment is detected on disk; droid (no .factory) must be dropped.
+    // Only augment is detected on disk; claude-code (no .claude) must be dropped.
     await selectAgentsInteractive({ installedAgents: ['augment'] as any });
 
     expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
@@ -123,27 +124,30 @@ describe('selectAgentsInteractive', () => {
   });
 
   it('should pre-select remembered agents that are installed', async () => {
-    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid', 'augment']);
-    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['droid', 'augment']);
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['claude-code', 'augment']);
+    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue([
+      'claude-code',
+      'augment',
+    ]);
 
-    await selectAgentsInteractive({ installedAgents: ['droid', 'augment'] as any });
+    await selectAgentsInteractive({ installedAgents: ['claude-code', 'augment'] as any });
 
     expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialSelected: ['droid', 'augment'],
+        initialSelected: ['claude-code', 'augment'],
       })
     );
   });
 
   it('should keep remembered agents when no installed list is provided', async () => {
-    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['droid']);
-    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['droid']);
+    vi.mocked(skillLock.getLastSelectedAgents).mockResolvedValue(['claude-code']);
+    vi.mocked(searchMultiselectModule.searchMultiselect).mockResolvedValue(['claude-code']);
 
     await selectAgentsInteractive({});
 
     expect(searchMultiselectModule.searchMultiselect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialSelected: ['droid'],
+        initialSelected: ['claude-code'],
       })
     );
   });

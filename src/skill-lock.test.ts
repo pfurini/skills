@@ -1,18 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { dirname, basename, join } from 'path';
 
-const { execSync } = vi.hoisted(() => ({ execSync: vi.fn() }));
-
-vi.mock('child_process', () => ({ execSync }));
-
-import {
-  getSkillLockPath,
-  readSkillLock,
-  addSkillToLock,
-  getGitHubToken,
-  resetGhAuthWarning,
-} from './skill-lock.ts';
+import { getSkillLockPath, readSkillLock, addSkillToLock, getGitHubToken } from './skill-lock.ts';
 
 // HOME is redirected to a throwaway dir by vitest.setup.ts, so these operate on
 // an isolated global lock, never the developer's real ~/.agents/.skill-lock.json.
@@ -106,18 +96,13 @@ describe('skill-lock durability', () => {
 describe('getGitHubToken', () => {
   const originalGitHubToken = process.env.GITHUB_TOKEN;
   const originalGhToken = process.env.GH_TOKEN;
-  let stderrWrite: MockInstance<typeof process.stderr.write>;
 
   beforeEach(() => {
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_TOKEN;
-    resetGhAuthWarning();
-    execSync.mockReset().mockReturnValue('ghp_test_token\n');
-    stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   });
 
   afterEach(() => {
-    stderrWrite.mockRestore();
     if (originalGitHubToken === undefined) {
       delete process.env.GITHUB_TOKEN;
     } else {
@@ -130,16 +115,20 @@ describe('getGitHubToken', () => {
     }
   });
 
-  it('describes the gh fallback as an automatic status, not an instruction', () => {
-    expect(getGitHubToken()).toBe('ghp_test_token');
+  it('prefers an explicitly supplied GITHUB_TOKEN', () => {
+    process.env.GITHUB_TOKEN = 'github-token';
+    process.env.GH_TOKEN = 'gh-token';
 
-    const status = stderrWrite.mock.calls
-      .map(([message]: [unknown, ...unknown[]]) => String(message))
-      .join('');
-    expect(status).toContain('GitHub API request limit reached');
-    expect(status).toContain('checking existing');
-    expect(status).toContain('authentication…');
-    expect(status).not.toContain('Tip:');
-    expect(status).not.toContain('to continue');
+    expect(getGitHubToken()).toBe('github-token');
+  });
+
+  it('uses an explicitly supplied GH_TOKEN', () => {
+    process.env.GH_TOKEN = 'gh-token';
+
+    expect(getGitHubToken()).toBe('gh-token');
+  });
+
+  it('does not extract credentials from external tools', () => {
+    expect(getGitHubToken()).toBeNull();
   });
 });

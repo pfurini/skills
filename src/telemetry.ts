@@ -1,5 +1,5 @@
-const TELEMETRY_URL = 'https://add-skill.vercel.sh/t';
-const AUDIT_URL = 'https://add-skill.vercel.sh/audit';
+const TELEMETRY_URL = 'https://www.skills.sh/tele/t';
+const AUDIT_URL = 'https://www.skills.sh/tele/audit';
 
 interface InstallTelemetryData {
   event: 'install';
@@ -112,6 +112,7 @@ export async function fetchAuditData(
   skillSlugs: string[],
   timeoutMs = 3000
 ): Promise<AuditResponse | null> {
+  if (!isEnabled()) return null;
   if (skillSlugs.length === 0) return null;
 
   try {
