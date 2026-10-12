@@ -1,4 +1,3 @@
-import { spawnSync } from 'child_process';
 import { existsSync, readdirSync } from 'fs';
 import { join, dirname, relative, sep } from 'path';
 import * as p from '@clack/prompts';
@@ -437,50 +436,33 @@ export async function processWellKnownUpdates(
 
     if (result.changedSkills.length === 0) continue;
 
-    const cliEntry = join(__dirname, '..', 'bin', 'cli.mjs');
-    if (!existsSync(cliEntry)) {
-      failCount += result.changedSkills.length;
-      console.log(`  ${DIM}✗ CLI entrypoint not found at ${cliEntry}${RESET}`);
-      continue;
-    }
-
     const itemByName = new Map(items.map((item) => [item.name, item]));
 
     for (const name of result.changedSkills) {
       const safeName = sanitizeMetadata(name);
       console.log(`${TEXT}Updating ${safeName}…${RESET}`);
 
+      // Install in-process like the other update paths. Spawning bin/cli.mjs
+      // would run the built dist/ (stale or missing when running from source).
       const subagents = itemByName.get(name)?.subagents;
-      const subagentArgs =
+      const subagentOption =
         !isGlobal && subagents?.length
-          ? ['--subagent', ...subagents.map((s) => (s === '' ? 'root' : s))]
-          : [];
+          ? { subagent: subagents.map((s) => (s === '' ? 'root' : s)) }
+          : {};
 
-      const spawnResult = spawnSync(
-        process.execPath,
-        [
-          cliEntry,
-          'add',
-          baseUrl,
-          '--skill',
-          name,
-          ...subagentArgs,
-          ...(isGlobal ? ['-g'] : []),
-          '-y',
-        ],
-        {
-          stdio: ['inherit', 'pipe', 'pipe'],
-          encoding: 'utf-8',
-          shell: false,
-        }
-      );
-
-      if (spawnResult.status === 0) {
+      try {
+        await runAddIsolated([baseUrl], {
+          skill: [name],
+          ...subagentOption,
+          ...(isGlobal ? { global: true } : {}),
+          yes: true,
+        });
         successCount++;
         console.log(`  ${TEXT}✓${RESET} Updated ${safeName}`);
-      } else {
+      } catch (error) {
         failCount++;
-        console.log(`  ${DIM}✗ Failed to update ${safeName}${RESET}`);
+        const message = error instanceof Error ? `: ${error.message}` : '';
+        console.log(`  ${DIM}✗ Failed to update ${safeName}${message}${RESET}`);
       }
     }
   }

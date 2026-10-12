@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { checkWellKnownForUpdates, type WellKnownUpdateItem } from '../src/update.ts';
+import {
+  checkWellKnownForUpdates,
+  processWellKnownUpdates,
+  type WellKnownUpdateItem,
+} from '../src/update.ts';
+import { runAdd } from '../src/add.ts';
 import {
   computeWellKnownSkillDigest,
   wellKnownProvider,
@@ -75,8 +80,12 @@ async function digestOf(name: string, contents = V1_CONTENTS): Promise<string> {
   return computeWellKnownSkillDigest(skill);
 }
 
+vi.mock('../src/add.ts', () => ({ runAdd: vi.fn() }));
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.mocked(runAdd).mockReset();
 });
 
 describe('computeWellKnownSkillDigest', () => {
@@ -254,5 +263,46 @@ describe('checkWellKnownForUpdates', () => {
       .map((call) => String(call[0]))
       .filter((url) => url.endsWith('/SKILL.md'));
     expect(fileCalls).toEqual([`${BASE_URL}/.well-known/skills/alpha-skill/SKILL.md`]);
+  });
+});
+
+describe('processWellKnownUpdates', () => {
+  function changedAlpha(): Map<string, WellKnownUpdateItem[]> {
+    stubWellKnownServer(v2Index([{ name: 'alpha-skill', digest: DIGEST_A }]));
+    return new Map([
+      [BASE_URL, [{ name: 'alpha-skill', digest: DIGEST_STALE, subagents: ['', 'research'] }]],
+    ]);
+  }
+
+  it('reinstalls a changed project skill in-process into its recorded subagents', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    const result = await processWellKnownUpdates(changedAlpha(), false, { yes: true });
+
+    expect(result).toEqual({ successCount: 1, failCount: 0, changed: true });
+    expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
+      skill: ['alpha-skill'],
+      subagent: ['root', 'research'],
+      yes: true,
+    });
+  });
+
+  it('counts a failed global reinstall without ending the run', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.mocked(runAdd).mockImplementation(async () => {
+      process.exit(1);
+    });
+
+    const result = await processWellKnownUpdates(changedAlpha(), true, { yes: true });
+
+    expect(result).toEqual({ successCount: 0, failCount: 1, changed: true });
+    // Global installs never carry Eve subagent placement.
+    expect(runAdd).toHaveBeenCalledWith([BASE_URL], {
+      skill: ['alpha-skill'],
+      global: true,
+      yes: true,
+    });
   });
 });
